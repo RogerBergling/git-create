@@ -1,0 +1,4355 @@
+#!/usr/bin/env python3
+"""git-create - a safe, menu-driven Git/GitHub project assistant.
+
+Single-file application. Python 3.9+ and the standard library only.
+
+The program deliberately avoids destructive Git operations:
+- no force pushes,
+- no automatic history rewriting,
+- no automatic overwriting of project files,
+- secret-looking tracked files are reported and blocked before commits.
+"""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import os
+import re
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import textwrap
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+APP = "git-create"
+VERSION = "1.1.0"
+HOME = Path.home()
+
+DEFAULT_PROJECTS = HOME / "Projects"
+DEFAULT_DEPTH = 3
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+GH_REPO_SPEC_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+KEY_TYPES = (
+    "ssh-ed25519",
+    "ssh-rsa",
+    "ecdsa-sha2-",
+    "sk-ssh-ed25519@openssh.com",
+    "sk-ecdsa-sha2-nistp256@openssh.com",
+)
+
+# ---------------------------------------------------------------------------
+# Templates
+# ---------------------------------------------------------------------------
+
+GITIGNORE_TEMPLATE = """\
+# ---------------------------------------------------------------------------
+# Secrets and local environment files
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+id_rsa
+id_dsa
+id_ecdsa
+id_ed25519
+*.kdbx
+.netrc
+.npmrc
+.pypirc
+credentials.json
+terraform.tfstate
+terraform.tfstate.*
+
+# ---------------------------------------------------------------------------
+# Operating systems and editors
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---------------------------------------------------------------------------
+# Logs and coverage
+# ---------------------------------------------------------------------------
+*.log
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# ---------------------------------------------------------------------------
+# Node / JavaScript
+# ---------------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+.nuxt/
+coverage/
+
+# ---------------------------------------------------------------------------
+# Go / Rust / Java
+# ---------------------------------------------------------------------------
+bin/
+*.test
+*.out
+target/
+*.class
+.gradle/
+
+# ---------------------------------------------------------------------------
+# Local data
+# ---------------------------------------------------------------------------
+*.sqlite
+*.sqlite3
+*.db
+"""
+
+DOCKERIGNORE_TEMPLATE = """\
+.git
+.gitignore
+.gitattributes
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+.netrc
+.npmrc
+.pypirc
+node_modules
+.venv
+venv
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+dist
+build
+coverage
+target
+*.log
+.vscode
+.idea
+Dockerfile
+docker-compose*.yml
+"""
+
+README_TEMPLATE = """\
+# {name}
+
+{description}
+
+## Getting started
+
+Describe how to install, configure, and run this project here.
+
+## Repository notes
+
+- The default branch is `main`.
+- Local secrets belong in `.env`; only `.env.example` should be committed.
+- Run `git-create` in this directory to verify the repository before pushing.
+"""
+
+EDITORCONFIG_TEMPLATE = """\
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml}]
+indent_size = 2
+
+[Makefile]
+indent_style = tab
+"""
+
+SECRET_APPEND_LINES: List[str] = [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "*.kdbx",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "terraform.tfstate",
+    "terraform.tfstate.*",
+]
+
+SECRET_TEST_PATH = {
+    ".env": ".env",
+    ".env.*": ".env.local",
+    "*.pem": "secret.pem",
+    "*.key": "secret.key",
+    "*.p12": "secret.p12",
+    "*.pfx": "secret.pfx",
+    "*.jks": "secret.jks",
+    "id_rsa": "id_rsa",
+    "id_dsa": "id_dsa",
+    "id_ecdsa": "id_ecdsa",
+    "id_ed25519": "id_ed25519",
+    "*.kdbx": "vault.kdbx",
+    ".netrc": ".netrc",
+    ".npmrc": ".npmrc",
+    ".pypirc": ".pypirc",
+    "credentials.json": "credentials.json",
+    "terraform.tfstate": "terraform.tfstate",
+    "terraform.tfstate.*": "terraform.tfstate.backup",
+}
+
+GITIGNORE_REQUIRED: List[Tuple[str, str]] = [
+    (".env", ".env"),
+    (".env.*", ".env.local"),
+    ("*.pem", "secret.pem"),
+    ("*.key", "secret.key"),
+    ("id_rsa", "id_rsa"),
+    ("id_ed25519", "id_ed25519"),
+    ("*.p12", "secret.p12"),
+    ("*.pfx", "secret.pfx"),
+    (".venv/", ".venv/x"),
+    ("node_modules/", "node_modules/x"),
+    ("__pycache__/", "__pycache__/x"),
+    ("*.log", "debug.log"),
+]
+
+SENSITIVE_NAME_PATTERNS = [
+    ".env",
+    ".env.*",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+    "*.jks",
+    "*.keystore",
+    "*.kdbx",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "*.ppk",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "credentials.json",
+    "credentials.yaml",
+    "terraform.tfstate",
+    "terraform.tfstate.*",
+]
+
+CONTENT_PATTERNS = [
+    (re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----"), "private key", True),
+    (re.compile(rb"-----BEGIN " + rb"PGP PRIVATE KEY BLOCK-----"), "PGP private key", True),
+    (re.compile(rb"AKIA[0-9A-Z]{16}"), "AWS access key", False),
+    (re.compile(rb"(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{30,})"), "GitHub token", False),
+    (re.compile(rb"xox[baprs]-[A-Za-z0-9-]{10,}"), "Slack token", False),
+    (re.compile(rb"AIza[0-9A-Za-z_-]{35}"), "Google API key", False),
+    (re.compile(rb"\bsk-[A-Za-z0-9]{32,}"), "possible API key", False),
+]
+
+SKIP_CONTENT_SCAN = {
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "Cargo.lock",
+    "poetry.lock",
+    "Pipfile.lock",
+}
+
+SETTING_HELP = {
+    "user.name": (
+        "The name Git records as the author of your commits.",
+        "Without it, Git may refuse to commit or record an incomplete identity. "
+        "Use the name you want other people to see in the history.",
+    ),
+    "user.email": (
+        "The email address Git records with each commit.",
+        "GitHub uses it to link commits to your account, and signed commits use "
+        "it as the principal in the allowed-signers file.",
+    ),
+    "init.defaultbranch": (
+        "The first branch name for new repositories.",
+        "Using main everywhere avoids the confusing mix of main and master "
+        "between local projects and GitHub.",
+    ),
+    "pull.ff": (
+        "Controls whether git pull may create a merge commit.",
+        "only makes pull stop unless it can fast-forward. That prevents an "
+        "accidental merge commit and makes divergence explicit.",
+    ),
+    "push.default": (
+        "Controls which remote branch a plain git push targets.",
+        "simple refuses ambiguous pushes and matches the branch name you expect.",
+    ),
+    "fetch.prune": (
+        "Removes local remote-tracking references whose remote branch is gone.",
+        "Keeps git branch -a and status from showing stale branches after "
+        "someone deletes a branch on GitHub.",
+    ),
+    "core.editor": (
+        "The editor Git opens for commit messages and interactive commands.",
+        "An explicit editor prevents Git from opening an unfamiliar default.",
+    ),
+    "gpg.format": (
+        "Tells Git which signing format to use.",
+        "ssh lets Git sign commits with your existing SSH key instead of "
+        "setting up a separate GPG key.",
+    ),
+    "user.signingkey": (
+        "The public SSH key Git uses to sign commits.",
+        "Git finds the matching private key (or ssh-agent) and attaches a "
+        "signature that others can verify.",
+    ),
+    "commit.gpgsign": (
+        "Signs every new commit automatically.",
+        "A signed history proves the commit came from your key and was not "
+        "changed after signing.",
+    ),
+    "tag.gpgsign": (
+        "Signs annotated tags automatically.",
+        "Signed release tags make it harder to tamper with version markers.",
+    ),
+    "gpg.ssh.allowedsignersfile": (
+        "A file listing which public keys and email principals you trust.",
+        "Git needs it to verify SSH signatures locally. Without it, a valid "
+        "signature may show as unknown even though GitHub accepts it.",
+    ),
+    "url.git@github.com:.insteadof": (
+        "Rewrites HTTPS GitHub URLs to SSH form before Git uses them.",
+        "You keep using convenient HTTPS URLs while authentication still uses "
+        "your SSH key and agent.",
+    ),
+}
+
+FILE_HELP = {
+    ".gitignore": "Prevents secrets, dependencies, build output, and local files from being staged.",
+    ".dockerignore": "Keeps .git, secrets, dependencies, and build output out of Docker build contexts.",
+    "README.md": "Explains what the project is and how to use it; it is the front page on GitHub.",
+    ".editorconfig": "Keeps indentation and line endings consistent across editors.",
+    ".env.example": "Documents required environment variable names without committing secret values.",
+}
+
+# ---------------------------------------------------------------------------
+# Terminal and reporting helpers
+# ---------------------------------------------------------------------------
+
+COLOR_ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None and os.environ.get("TERM") != "dumb"
+
+ANSI = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "magenta": "\033[35m",
+    "cyan": "\033[36m",
+}
+
+
+def col(text: str, *styles: str) -> str:
+    if not COLOR_ENABLED or not styles:
+        return text
+    prefix = "".join(ANSI.get(style, "") for style in styles)
+    return f"{prefix}{text}{ANSI['reset']}"
+
+
+def term_width() -> int:
+    try:
+        width = shutil.get_terminal_size((100, 24)).columns
+    except OSError:
+        width = 100
+    return max(60, min(width, 118))
+
+
+def one_line(text: str, limit: int = 160) -> str:
+    value = " ".join((text or "").split())
+    if len(value) > limit:
+        return value[: limit - 3] + "..."
+    return value
+
+
+def wrap(text: str, indent: str = "        ") -> str:
+    return textwrap.fill(
+        text,
+        width=term_width(),
+        subsequent_indent=indent,
+        break_long_words=False,
+        break_on_hyphens=False,
+    )
+
+
+@dataclass
+class Check:
+    level: str
+    label: str
+    detail: str = ""
+    hint: str = ""
+
+    def as_dict(self) -> Dict[str, str]:
+        return {
+            "level": self.level,
+            "label": self.label,
+            "detail": self.detail,
+            "hint": self.hint,
+        }
+
+
+@dataclass
+class Section:
+    title: str
+    checks: List[Check] = field(default_factory=list)
+
+
+@dataclass
+class Report:
+    title: str
+    sections: List[Section] = field(default_factory=list)
+    meta: Dict[str, object] = field(default_factory=dict)
+
+    def section(self, title: str) -> Section:
+        for section in self.sections:
+            if section.title == title:
+                return section
+        section = Section(title)
+        self.sections.append(section)
+        return section
+
+    def add(self, title: str, level: str, label: str, detail: str = "", hint: str = "") -> None:
+        self.section(title).checks.append(Check(level, label, detail, hint))
+
+    def extend(self, other: "Report") -> None:
+        for section in other.sections:
+            ours = self.section(section.title)
+            ours.checks.extend(section.checks)
+
+    def checks(self) -> List[Check]:
+        return [check for section in self.sections for check in section.checks]
+
+    def counts(self) -> Dict[str, int]:
+        counts = {"PASS": 0, "WARN": 0, "FAIL": 0, "INFO": 0, "SKIP": 0}
+        for check in self.checks():
+            counts[check.level] = counts.get(check.level, 0) + 1
+        return counts
+
+    def has_failures(self) -> bool:
+        return any(check.level == "FAIL" for check in self.checks())
+
+    def as_dict(self) -> Dict[str, object]:
+        return {
+            "app": APP,
+            "version": VERSION,
+            "title": self.title,
+            "meta": self.meta,
+            "summary": self.counts(),
+            "sections": [
+                {
+                    "title": section.title,
+                    "checks": [check.as_dict() for check in section.checks],
+                }
+                for section in self.sections
+            ],
+        }
+
+
+LEVEL_MARKER = {
+    "PASS": "[OK]",
+    "WARN": "[!]",
+    "FAIL": "[X]",
+    "INFO": "[i]",
+    "SKIP": "[-]",
+}
+
+LEVEL_STYLE = {
+    "PASS": ("green",),
+    "WARN": ("yellow",),
+    "FAIL": ("red", "bold"),
+    "INFO": ("cyan",),
+    "SKIP": ("dim",),
+}
+
+
+def print_check(check: Check, show_hint: bool = True) -> None:
+    marker = col(LEVEL_MARKER.get(check.level, "[?]"), *LEVEL_STYLE.get(check.level, ()))
+    line = f"  {marker} {check.label}"
+    if check.detail:
+        line += f" - {check.detail}"
+    print(wrap(line))
+    if check.hint and show_hint:
+        print(col(wrap(f"-> {check.hint}", indent="       "), "dim"))
+
+
+def print_report(report: Report, only_problems: bool = False) -> None:
+    print()
+    print(col(report.title, "bold"))
+    for section in report.sections:
+        visible = [
+            check
+            for check in section.checks
+            if not only_problems or check.level in ("FAIL", "WARN")
+        ]
+        if not visible:
+            continue
+        print()
+        print(col(section.title, "bold", "blue"))
+        for check in visible:
+            print_check(check)
+    counts = report.counts()
+    print()
+    print(
+        "Summary: "
+        + col(f"{counts['PASS']} passed", "green")
+        + ", "
+        + col(f"{counts['WARN']} warning(s)", "yellow")
+        + ", "
+        + col(f"{counts['FAIL']} failure(s)", "red")
+    )
+
+
+def heading(title: str) -> None:
+    print()
+    print(col(title, "bold"))
+    print(col("-" * min(len(title), term_width()), "dim"))
+
+
+def success(message: str) -> None:
+    print(col("[OK] ", "green") + message)
+
+
+def warning(message: str) -> None:
+    print(col("[!] ", "yellow") + message)
+
+
+def failure(message: str) -> None:
+    print(col("[X] ", "red") + message)
+
+
+def info(message: str) -> None:
+    print(col("[i] ", "cyan") + message)
+
+
+def explain(what: str, why: str, safety: str = "") -> None:
+    """Show a beginner-friendly explanation before an action or command."""
+    print()
+    print(col("What this does:", "bold"))
+    print(wrap("  " + what, indent="  "))
+    print(col("Why:", "bold"))
+    print(wrap("  " + why, indent="  "))
+    if safety:
+        print(col("Safety:", "yellow"))
+        print(wrap("  " + safety, indent="  "))
+
+
+# ---------------------------------------------------------------------------
+# Command helpers
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CmdResult:
+    args: List[str]
+    returncode: int
+    out: str
+    err: str
+    timed_out: bool = False
+
+    @property
+    def combined(self) -> str:
+        return (self.out + ("\n" if self.out and self.err else "") + self.err).strip()
+
+
+def run_cmd(
+    args: Sequence[object],
+    cwd: Optional[Path] = None,
+    timeout: int = 30,
+    env_extra: Optional[Dict[str, str]] = None,
+    input_text: Optional[str] = None,
+) -> CmdResult:
+    cmd = [str(arg) for arg in args]
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    if env_extra:
+        env.update(env_extra)
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env=env,
+            input=input_text,
+            stdin=None if input_text is not None else subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+        return CmdResult(cmd, result.returncode, result.stdout or "", result.stderr or "")
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ""
+        err = exc.stderr or ""
+        if isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        if isinstance(err, bytes):
+            err = err.decode("utf-8", "replace")
+        return CmdResult(cmd, 124, out, (err + "\ncommand timed out").strip(), True)
+    except FileNotFoundError:
+        return CmdResult(cmd, 127, "", f"command not found: {cmd[0]}")
+    except OSError as exc:
+        return CmdResult(cmd, 126, "", str(exc))
+
+
+def run_interactive(args: Sequence[object], cwd: Optional[Path] = None) -> int:
+    cmd = [str(arg) for arg in args]
+    try:
+        return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=os.environ.copy()).returncode
+    except FileNotFoundError:
+        failure(f"Command not found: {cmd[0]}")
+        return 127
+    except OSError as exc:
+        failure(str(exc))
+        return 126
+
+
+def git(path: Path, *args: object, timeout: int = 30, env_extra: Optional[Dict[str, str]] = None) -> CmdResult:
+    return run_cmd(["git", "-C", str(path), *args], timeout=timeout, env_extra=env_extra)
+
+
+def git_out(path: Path, *args: object) -> str:
+    result = git(path, *args)
+    return result.out.strip() if result.returncode == 0 else ""
+
+
+def remote_env() -> Dict[str, str]:
+    ssh_command = os.environ.get("GIT_SSH_COMMAND", "ssh")
+    return {"GIT_SSH_COMMAND": f"{ssh_command} -o BatchMode=yes -o ConnectTimeout=10"}
+
+
+def which_gh() -> Optional[str]:
+    return shutil.which("gh")
+
+
+# ---------------------------------------------------------------------------
+# Config and key helpers
+# ---------------------------------------------------------------------------
+
+
+def parse_config_entries(raw: str) -> Dict[str, List[str]]:
+    entries: Dict[str, List[str]] = {}
+    for item in raw.split("\0"):
+        if not item:
+            continue
+        key, separator, value = item.partition("\n")
+        if not separator:
+            key, value = item, ""
+        entries.setdefault(key.lower(), []).append(value)
+    return entries
+
+
+def read_global_config() -> Dict[str, List[str]]:
+    result = run_cmd(["git", "config", "--global", "--null", "--list"], timeout=10)
+    if result.returncode != 0:
+        return {}
+    return parse_config_entries(result.out)
+
+
+def read_local_config(root: Path) -> Dict[str, List[str]]:
+    result = git(root, "config", "--local", "--null", "--list", timeout=10)
+    if result.returncode != 0:
+        return {}
+    return parse_config_entries(result.out)
+
+
+def cfg_get(config: Dict[str, List[str]], key: str, default: str = "") -> str:
+    values = config.get(key.lower())
+    if not values:
+        return default
+    return values[0]
+
+
+def find_existing_path(value: str) -> Optional[Path]:
+    expanded = os.path.expanduser(os.path.expandvars(value))
+    path = Path(expanded)
+    candidates = [path] if path.is_absolute() else [Path.cwd() / path, HOME / path]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def resolve_public_key(value: str) -> Tuple[Optional[Path], Optional[str], str]:
+    """Return (path, public key text, error)."""
+    if not value or not value.strip():
+        return None, None, "not configured"
+    value = value.strip()
+    if value.startswith(KEY_TYPES):
+        return None, value, ""
+    path = find_existing_path(value)
+    if path is None:
+        return None, None, f"file not found: {value}"
+    if not path.is_file():
+        return None, None, f"not a file: {value}"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError as exc:
+        return None, None, str(exc)
+    if "PRIVATE KEY" in text:
+        return path, None, "this is a private key; configure the .pub file instead"
+    if not text.startswith(KEY_TYPES):
+        return path, None, "file does not contain an SSH public key"
+    return path, text, ""
+
+
+def key_data(text: str) -> str:
+    parts = text.split()
+    return " ".join(parts[:2]) if len(parts) >= 2 else text
+
+
+def allowed_signers_key_data(line: str) -> str:
+    """Extract 'ssh-type key-data' from an allowed_signers line."""
+    tokens = line.split()
+    for index, token in enumerate(tokens):
+        if token.startswith(KEY_TYPES) and index + 1 < len(tokens):
+            return " ".join(tokens[index : index + 2])
+    return ""
+
+
+def key_fingerprint(path: Optional[Path]) -> str:
+    if path is None or not shutil.which("ssh-keygen"):
+        return ""
+    result = run_cmd(["ssh-keygen", "-lf", str(path)], timeout=5)
+    if result.returncode != 0:
+        return ""
+    return one_line(result.out, 90)
+
+
+def private_key_state(public_path: Optional[Path]) -> Tuple[str, str, str]:
+    if public_path is None or public_path.suffix != ".pub":
+        return "SKIP", "", ""
+    private_path = public_path.with_suffix("")
+    if not private_path.exists():
+        return (
+            "WARN",
+            f"private key not found next to {public_path.name}",
+            "Git needs the private key for SSH signing. It may be held by ssh-agent, but usually the matching private key must exist.",
+        )
+    try:
+        mode = stat.S_IMODE(private_path.stat().st_mode)
+    except OSError:
+        mode = 0
+    if mode & 0o077:
+        return (
+            "WARN",
+            f"private key permissions are too open ({oct(mode)})",
+            f"Run: chmod 600 {private_path}",
+        )
+    return "PASS", f"private key present ({oct(mode)})", ""
+
+
+def signing_url_rewrite(config: Dict[str, List[str]]) -> bool:
+    for key, values in config.items():
+        if key.startswith("url.") and key.endswith(".insteadof"):
+            base = key[4 : -len(".insteadof")]
+            if base.rstrip("/") != "git@github.com:":
+                continue
+            for value in values:
+                if value.rstrip("/").startswith("https://github.com"):
+                    return True
+    return False
+
+
+def set_global_config(key: str, value: str, add: bool = False) -> bool:
+    args = ["git", "config", "--global"]
+    args.append("--add" if add else "--replace-all")
+    args.extend([key, value])
+    result = run_cmd(args, timeout=10)
+    if result.returncode == 0:
+        success(f"set {key} = {value}")
+        return True
+    failure(f"could not set {key}: {one_line(result.combined)}")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# GitHub helpers
+# ---------------------------------------------------------------------------
+
+
+def gh_auth_status() -> Tuple[bool, Optional[str], str]:
+    gh = which_gh()
+    if not gh:
+        return False, None, "gh is not installed"
+    result = run_cmd([gh, "auth", "status", "--hostname", "github.com"], timeout=12)
+    text = result.combined
+    match = re.search(r"account\s+([^\s(]+)", text)
+    account = match.group(1) if match else None
+    return result.returncode == 0, account, text
+
+
+def fetch_github_signing_keys() -> Tuple[Optional[List[dict]], str]:
+    gh = which_gh()
+    if not gh:
+        return None, "gh is not installed"
+    result = run_cmd([gh, "api", "user/ssh_signing_keys"], timeout=20)
+    if result.returncode != 0:
+        return None, one_line(result.combined, 240)
+    try:
+        data = json.loads(result.out)
+    except json.JSONDecodeError as exc:
+        return None, f"could not parse GitHub response: {exc}"
+    if not isinstance(data, list):
+        return None, "unexpected GitHub response"
+    return [item for item in data if isinstance(item, dict)], ""
+
+
+def gh_repo_info(root: Path) -> Tuple[Optional[dict], str]:
+    gh = which_gh()
+    if not gh:
+        return None, "gh is not installed"
+    result = run_cmd(
+        [gh, "repo", "view", "--json", "nameWithOwner,visibility,defaultBranchRef,url"],
+        cwd=root,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        return None, one_line(result.combined, 240)
+    try:
+        data = json.loads(result.out)
+    except json.JSONDecodeError as exc:
+        return None, f"could not parse gh response: {exc}"
+    return data if isinstance(data, dict) else None, ""
+
+
+def parse_github_url(url: str) -> Optional[Tuple[str, str]]:
+    clean = url.strip().rstrip("/")
+    if clean.endswith(".git"):
+        clean = clean[:-4]
+    match = re.match(r"^git@github\.com:([^/]+)/([^/]+)$", clean)
+    if match:
+        return match.group(1), match.group(2)
+    match = re.match(r"^(?:https?|ssh)://(?:[^@/]+@)?github\.com/([^/]+)/([^/]+)$", clean)
+    if match:
+        return match.group(1), match.group(2)
+    return None
+
+
+def ensure_gh(require_auth: bool = True, offer_login: bool = True) -> bool:
+    gh = which_gh()
+    if not gh:
+        failure("GitHub CLI 'gh' is not installed.")
+        info("Install it from https://cli.github.com/ and run: gh auth login --hostname github.com --git-protocol ssh")
+        return False
+    if not require_auth:
+        return True
+    ok, account, text = gh_auth_status()
+    if ok:
+        success(f"GitHub CLI authenticated{f' as {account}' if account else ''}.")
+        return True
+    warning("GitHub CLI is not authenticated for github.com.")
+    if text:
+        print(col(text, "dim"))
+    if offer_login and sys.stdin.isatty():
+        if confirm("Run 'gh auth login' now?", True):
+            code = run_interactive(
+                [gh, "auth", "login", "--hostname", "github.com", "--web", "--git-protocol", "ssh"]
+            )
+            if code == 0:
+                ok, account, _ = gh_auth_status()
+                if ok:
+                    success(f"Authenticated{f' as {account}' if account else ''}.")
+                    return True
+    info("Run: gh auth login --hostname github.com --git-protocol ssh")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Global checks
+# ---------------------------------------------------------------------------
+
+
+def build_global_report(config: Optional[Dict[str, List[str]]] = None, deep: bool = False) -> Report:
+    config = config if config is not None else read_global_config()
+    report = Report("Global configuration")
+    report.meta["deep"] = deep
+
+    tools = report.section("Global tools")
+    git_version = run_cmd(["git", "--version"], timeout=5)
+    if git_version.returncode == 0:
+        tools.checks.append(Check("PASS", "git", one_line(git_version.out, 80)))
+    else:
+        tools.checks.append(Check("FAIL", "git", "not installed", "Install git before using this tool."))
+
+    gh = which_gh()
+    if gh:
+        gh_version = run_cmd([gh, "--version"], timeout=5)
+        tools.checks.append(Check("PASS", "GitHub CLI (gh)", one_line(gh_version.out, 80)))
+    else:
+        tools.checks.append(
+            Check("WARN", "GitHub CLI (gh)", "not installed", "Install gh for GitHub scenarios A-D and signing-key management.")
+        )
+
+    if shutil.which("ssh-keygen"):
+        tools.checks.append(Check("PASS", "ssh-keygen", "available"))
+    else:
+        tools.checks.append(Check("WARN", "ssh-keygen", "not found", "Install OpenSSH client tools for SSH signing."))
+    if shutil.which("ssh"):
+        tools.checks.append(Check("PASS", "ssh", "available"))
+    else:
+        tools.checks.append(Check("WARN", "ssh", "not found", "Install OpenSSH client."))
+
+    identity = report.section("Global identity")
+    name = cfg_get(config, "user.name")
+    email = cfg_get(config, "user.email")
+    if name.strip():
+        identity.checks.append(Check("PASS", "user.name", name))
+    else:
+        identity.checks.append(
+            Check("FAIL", "user.name", "not set", 'Run: git config --global user.name "Your Name"')
+        )
+    if email.strip() and EMAIL_RE.match(email.strip()):
+        identity.checks.append(Check("PASS", "user.email", email))
+    elif email.strip():
+        identity.checks.append(
+            Check("FAIL", "user.email", f"invalid address: {email}", 'Run: git config --global user.email "you@example.com"')
+        )
+    else:
+        identity.checks.append(
+            Check("FAIL", "user.email", "not set", 'Run: git config --global user.email "you@example.com"')
+        )
+
+    defaults = report.section("Global defaults")
+    default_branch = cfg_get(config, "init.defaultbranch")
+    if default_branch.lower() == "main":
+        defaults.checks.append(Check("PASS", "init.defaultBranch", "main"))
+    else:
+        defaults.checks.append(
+            Check(
+                "WARN",
+                "init.defaultBranch",
+                default_branch or "not set (git may use master)",
+                "Recommended: git config --global init.defaultBranch main",
+            )
+        )
+
+    pull_ff = cfg_get(config, "pull.ff").lower()
+    if pull_ff == "only":
+        defaults.checks.append(Check("PASS", "pull.ff", "only"))
+    else:
+        defaults.checks.append(
+            Check(
+                "WARN",
+                "pull.ff",
+                pull_ff or "not set",
+                "Recommended: git config --global pull.ff only (prevents accidental merge commits on pull)",
+            )
+        )
+
+    push_default = cfg_get(config, "push.default").lower()
+    if push_default == "simple":
+        defaults.checks.append(Check("PASS", "push.default", "simple"))
+    elif not push_default:
+        defaults.checks.append(
+            Check("INFO", "push.default", "not set (modern Git defaults to simple)", "Optional: git config --global push.default simple")
+        )
+    else:
+        defaults.checks.append(
+            Check("WARN", "push.default", push_default, "Recommended: git config --global push.default simple")
+        )
+
+    fetch_prune = cfg_get(config, "fetch.prune").lower()
+    if fetch_prune == "true":
+        defaults.checks.append(Check("PASS", "fetch.prune", "true"))
+    elif not fetch_prune:
+        defaults.checks.append(
+            Check("INFO", "fetch.prune", "not set", "Optional: git config --global fetch.prune true")
+        )
+    else:
+        defaults.checks.append(Check("WARN", "fetch.prune", fetch_prune, "Recommended: git config --global fetch.prune true"))
+
+    editor = cfg_get(config, "core.editor")
+    if editor.strip():
+        defaults.checks.append(Check("PASS", "core.editor", editor))
+    else:
+        defaults.checks.append(
+            Check("WARN", "core.editor", "not set", "Recommended: git config --global core.editor nano")
+        )
+
+    signing = report.section("Global SSH signing")
+    gpg_format = cfg_get(config, "gpg.format").lower()
+    if gpg_format == "ssh":
+        signing.checks.append(Check("PASS", "gpg.format", "ssh"))
+    else:
+        signing.checks.append(
+            Check("WARN", "gpg.format", gpg_format or "not set", "Recommended: git config --global gpg.format ssh")
+        )
+
+    signing_key_value = cfg_get(config, "user.signingkey")
+    if signing_key_value:
+        key_path, key_text, error = resolve_public_key(signing_key_value)
+        if error:
+            signing.checks.append(
+                Check("WARN", "user.signingkey", error, "Point user.signingkey at your SSH public key, e.g. ~/.ssh/id_ed25519.pub")
+            )
+        else:
+            fingerprint = key_fingerprint(key_path)
+            detail = str(key_path) if key_path else "inline public key"
+            if fingerprint:
+                detail += f" ({fingerprint})"
+            signing.checks.append(Check("PASS", "user.signingkey", detail))
+            level, private_detail, private_hint = private_key_state(key_path)
+            if level != "SKIP":
+                signing.checks.append(Check(level, "SSH private key", private_detail, private_hint))
+    else:
+        signing.checks.append(
+            Check(
+                "WARN",
+                "user.signingkey",
+                "not set",
+                "Recommended: git config --global user.signingkey ~/.ssh/id_ed25519.pub",
+            )
+        )
+
+    commit_sign = cfg_get(config, "commit.gpgsign").lower()
+    if commit_sign == "true":
+        signing.checks.append(Check("PASS", "commit.gpgsign", "true"))
+    else:
+        signing.checks.append(
+            Check(
+                "WARN",
+                "commit.gpgsign",
+                commit_sign or "not set",
+                "Recommended: git config --global commit.gpgsign true",
+            )
+        )
+
+    tag_sign = cfg_get(config, "tag.gpgsign").lower()
+    signing.checks.append(
+        Check(
+            "PASS" if tag_sign == "true" else "INFO",
+            "tag.gpgsign",
+            tag_sign or "not set",
+            "Optional: git config --global tag.gpgsign true (signs annotated tags)",
+        )
+    )
+
+    allowed = cfg_get(config, "gpg.ssh.allowedSignersFile")
+    if allowed:
+        allowed_path = find_existing_path(allowed)
+        if allowed_path and allowed_path.is_file():
+            _, configured_key_text, _ = resolve_public_key(signing_key_value) if signing_key_value else (None, None, "")
+            if configured_key_text:
+                wanted = key_data(configured_key_text)
+                present = any(
+                    allowed_signers_key_data(line) == wanted
+                    for line in read_text(allowed_path).splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                )
+                if present:
+                    signing.checks.append(
+                        Check("PASS", "gpg.ssh.allowedSignersFile", f"{allowed_path} (signing key present)")
+                    )
+                else:
+                    signing.checks.append(
+                        Check(
+                            "WARN",
+                            "gpg.ssh.allowedSignersFile",
+                            f"{allowed_path} exists but the configured signing key is not listed",
+                            "Use option 10 to append the configured public key.",
+                        )
+                    )
+            else:
+                signing.checks.append(Check("PASS", "gpg.ssh.allowedSignersFile", str(allowed_path)))
+        else:
+            signing.checks.append(
+                Check(
+                    "WARN",
+                    "gpg.ssh.allowedSignersFile",
+                    f"file not found: {allowed}",
+                    "Create an allowed-signers file and set gpg.ssh.allowedSignersFile to verify SSH-signed commits locally.",
+                )
+            )
+    else:
+        signing.checks.append(
+            Check(
+                "WARN",
+                "gpg.ssh.allowedSignersFile",
+                "not set; SSH signatures will show as unknown locally",
+                "Recommended: configure gpg.ssh.allowedSignersFile so 'git log --show-signature' can verify commits.",
+            )
+        )
+
+    github = report.section("GitHub access")
+    if signing_url_rewrite(config):
+        github.checks.append(Check("PASS", "GitHub HTTPS rewrite", "https://github.com/ -> git@github.com:"))
+    else:
+        github.checks.append(
+            Check(
+                "WARN",
+                "GitHub HTTPS rewrite",
+                "not configured",
+                'Recommended: git config --global url."git@github.com:".insteadOf "https://github.com/"',
+            )
+        )
+
+    gh = which_gh()
+    if not gh:
+        github.checks.append(Check("WARN", "GitHub CLI authentication", "gh not installed", "Install gh and run gh auth login."))
+    else:
+        ok, account, text = gh_auth_status()
+        if ok:
+            github.checks.append(Check("PASS", "GitHub CLI authentication", account or "authenticated for github.com"))
+        else:
+            github.checks.append(
+                Check(
+                    "WARN",
+                    "GitHub CLI authentication",
+                    one_line(text, 120) or "not authenticated",
+                    "Run: gh auth login --hostname github.com --git-protocol ssh",
+                )
+            )
+
+        if deep:
+            key_path, key_text, key_error = resolve_public_key(signing_key_value) if signing_key_value else (None, None, "no key")
+            if not key_text:
+                github.checks.append(
+                    Check("SKIP", "Signing key registered on GitHub", key_error or "no signing key configured")
+                )
+            elif not ok:
+                github.checks.append(Check("SKIP", "Signing key registered on GitHub", "gh is not authenticated"))
+            else:
+                keys, error = fetch_github_signing_keys()
+                if error:
+                    github.checks.append(
+                        Check(
+                            "WARN",
+                            "Signing key registered on GitHub",
+                            error,
+                            "Try: gh auth refresh -h github.com -s admin:ssh_signing_key",
+                        )
+                    )
+                else:
+                    wanted = key_data(key_text)
+                    found = None
+                    for item in keys or []:
+                        if key_data(str(item.get("key", ""))) == wanted:
+                            found = item
+                            break
+                    if found:
+                        github.checks.append(
+                            Check("PASS", "Signing key registered on GitHub", str(found.get("title") or "registered"))
+                        )
+                    else:
+                        target = str(key_path) if key_path else "~/.ssh/id_ed25519.pub"
+                        github.checks.append(
+                            Check(
+                                "WARN",
+                                "Signing key registered on GitHub",
+                                "configured signing key is not registered",
+                                f"Run: gh ssh-key add {target} --type signing (may require: gh auth refresh -h github.com -s admin:ssh_signing_key)",
+                            )
+                        )
+
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Repository inspection helpers
+# ---------------------------------------------------------------------------
+
+
+def detect_git_root(path: Path) -> Optional[Path]:
+    try:
+        candidate = path.expanduser()
+        if candidate.is_file():
+            candidate = candidate.parent
+        if not candidate.exists():
+            return None
+    except OSError:
+        return None
+    result = run_cmd(["git", "-C", str(candidate), "rev-parse", "--show-toplevel"], timeout=10)
+    if result.returncode != 0:
+        return None
+    value = result.out.strip()
+    return Path(value).resolve() if value else None
+
+
+def git_path(root: Path, name: str) -> Path:
+    result = git(root, "rev-parse", "--git-path", name, timeout=10)
+    if result.returncode != 0 or not result.out.strip():
+        return root / ".git" / name
+    path = Path(result.out.strip())
+    return path if path.is_absolute() else root / path
+
+
+def is_linked_worktree(root: Path) -> bool:
+    git_dir = git_out(root, "rev-parse", "--absolute-git-dir")
+    common_dir = git_out(root, "rev-parse", "--git-common-dir")
+    if not git_dir or not common_dir:
+        return False
+    common_path = Path(common_dir)
+    if not common_path.is_absolute():
+        common_path = root / common_path
+    try:
+        return Path(git_dir).resolve() != common_path.resolve()
+    except OSError:
+        return False
+
+
+def in_progress_operations(root: Path) -> List[str]:
+    markers = [
+        ("MERGE_HEAD", "merge in progress"),
+        ("CHERRY_PICK_HEAD", "cherry-pick in progress"),
+        ("REVERT_HEAD", "revert in progress"),
+        ("BISECT_LOG", "bisect in progress"),
+        ("rebase-merge", "rebase in progress"),
+        ("rebase-apply", "rebase/am in progress"),
+    ]
+    operations = []
+    for name, label in markers:
+        if git_path(root, name).exists():
+            operations.append(label)
+    return operations
+
+
+@dataclass
+class StatusEntry:
+    code: str
+    path: str
+    original: Optional[str] = None
+
+    @property
+    def display(self) -> str:
+        if self.original:
+            return f"{self.code} {self.original} -> {self.path}"
+        return f"{self.code} {self.path}"
+
+    @property
+    def stage_paths(self) -> List[str]:
+        paths = [self.path]
+        if self.original:
+            paths.append(self.original)
+        return paths
+
+
+def status_entries(root: Path) -> List[StatusEntry]:
+    result = git(root, "status", "--porcelain=v1", "-z", timeout=20)
+    if result.returncode != 0:
+        return []
+    parts = result.out.split("\0")
+    entries: List[StatusEntry] = []
+    index = 0
+    while index < len(parts):
+        item = parts[index]
+        index += 1
+        if not item or len(item) < 4:
+            continue
+        code = item[:2]
+        path = item[3:]
+        original = None
+        if code[0] in ("R", "C") and index < len(parts):
+            original = parts[index]
+            index += 1
+        entries.append(StatusEntry(code, path, original))
+    return entries
+
+
+def status_counts(entries: Sequence[StatusEntry]) -> Dict[str, int]:
+    counts = {"staged": 0, "unstaged": 0, "untracked": 0, "conflicts": 0}
+    for entry in entries:
+        code = entry.code
+        if code == "??":
+            counts["untracked"] += 1
+            continue
+        if code[0] not in (" ", "?"):
+            counts["staged"] += 1
+        if code[1] not in (" ", "?"):
+            counts["unstaged"] += 1
+        if code[0] == "U" or code[1] == "U" or code in ("AA", "DD"):
+            counts["conflicts"] += 1
+    return counts
+
+
+def tracked_files(root: Path) -> List[str]:
+    result = git(root, "ls-files", "-z", timeout=20)
+    if result.returncode != 0:
+        return []
+    return [item for item in result.out.split("\0") if item]
+
+
+def effective_identity(root: Path) -> Tuple[str, str]:
+    return (
+        git_out(root, "config", "--get", "user.name"),
+        git_out(root, "config", "--get", "user.email"),
+    )
+
+
+def identity_ready(root: Path) -> bool:
+    name, email = effective_identity(root)
+    if name and email and EMAIL_RE.match(email):
+        return True
+    failure("Git identity is not configured for this repository.")
+    print("  Set it globally (option 10) or locally:")
+    print('    git config --global user.name "Your Name"')
+    print('    git config --global user.email "you@example.com"')
+    return False
+
+
+def remote_urls(root: Path) -> Dict[str, str]:
+    names = [line.strip() for line in git_out(root, "remote").splitlines() if line.strip()]
+    remotes: Dict[str, str] = {}
+    for name in names:
+        url = git_out(root, "remote", "get-url", name)
+        if url:
+            remotes[name] = url
+    return remotes
+
+
+def check_remote_access(root: Path) -> Tuple[bool, Optional[str], str]:
+    if "origin" not in remote_urls(root):
+        return False, None, "no origin remote"
+    result = git(root, "ls-remote", "--symref", "origin", "HEAD", timeout=20, env_extra=remote_env())
+    if result.returncode != 0:
+        return False, None, one_line(result.err or result.out, 240)
+    default_branch = None
+    for line in result.out.splitlines():
+        match = re.match(r"ref:\s+refs/heads/(\S+)\s+HEAD", line)
+        if match:
+            default_branch = match.group(1)
+            break
+    return True, default_branch, ""
+
+
+def is_sensitive_name(path: str) -> bool:
+    name = Path(path).name.lower()
+    if name in (".env.example", ".env.sample", ".env.template"):
+        return False
+    if name == ".env" or name.startswith(".env."):
+        return True
+    for pattern in SENSITIVE_NAME_PATTERNS:
+        if pattern.startswith(".env"):
+            continue
+        if fnmatch.fnmatch(name, pattern.lower()):
+            return True
+    return False
+
+
+def scan_secret_content(
+    root: Path,
+    paths: Sequence[str],
+    max_files: int = 2500,
+    max_bytes: int = 12 * 1024 * 1024,
+) -> Tuple[List[Tuple[str, int, str, bool]], bool]:
+    findings: List[Tuple[str, int, str, bool]] = []
+    total = 0
+    scanned = 0
+    truncated = False
+    for relative in paths:
+        if scanned >= max_files or total >= max_bytes:
+            truncated = True
+            break
+        rel_path = Path(relative)
+        if rel_path.name in SKIP_CONTENT_SCAN:
+            continue
+        absolute = root / rel_path
+        try:
+            if absolute.is_symlink() or not absolute.is_file():
+                continue
+            size = absolute.stat().st_size
+        except OSError:
+            continue
+        if size == 0 or size > 1024 * 1024 or size > max_bytes - total:
+            continue
+        try:
+            data = absolute.read_bytes()
+        except OSError:
+            continue
+        scanned += 1
+        total += len(data)
+        if b"\0" in data[:8192]:
+            continue
+        for line_number, line in enumerate(data.splitlines(), 1):
+            for pattern, kind, high_risk in CONTENT_PATTERNS:
+                if pattern.search(line):
+                    findings.append((relative, line_number, kind, high_risk))
+                    if len(findings) >= 50:
+                        return findings, True
+                    break
+    return findings, truncated
+
+
+def large_tracked_files(root: Path, paths: Sequence[str]) -> List[Tuple[str, int]]:
+    files: List[Tuple[str, int]] = []
+    for relative in paths:
+        absolute = root / relative
+        try:
+            if absolute.is_symlink() or not absolute.is_file():
+                continue
+            files.append((relative, absolute.stat().st_size))
+        except OSError:
+            continue
+    files.sort(key=lambda item: item[1], reverse=True)
+    return files
+
+
+def format_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{size} B"
+
+
+def find_readme(root: Path) -> Optional[Path]:
+    try:
+        for item in root.iterdir():
+            if item.is_file() and item.name.lower().startswith("readme"):
+                return item
+    except OSError:
+        return None
+    return None
+
+
+def find_license(root: Path) -> Optional[Path]:
+    try:
+        for item in root.iterdir():
+            if item.is_file() and (
+                item.name.upper().startswith("LICENSE") or item.name.upper().startswith("COPYING")
+            ):
+                return item
+    except OSError:
+        return None
+    return None
+
+
+def dockerfile_present(root: Path) -> bool:
+    try:
+        for item in root.iterdir():
+            if item.is_file() and (
+                item.name.lower().startswith("dockerfile") or item.name.lower().endswith(".dockerfile")
+            ):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def read_text(path: Path, limit: int = 512 * 1024) -> str:
+    try:
+        data = path.read_bytes()[:limit]
+        return data.decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def pattern_matches(pattern: str, candidate: str) -> bool:
+    normalized = pattern.strip()
+    if not normalized:
+        return False
+    normalized = normalized.lstrip("/")
+    if normalized.endswith("/"):
+        normalized += "**"
+    if "/" in normalized:
+        return fnmatch.fnmatch(candidate, normalized) or fnmatch.fnmatch(
+            candidate, normalized.rstrip("/") + "/*"
+        )
+    return fnmatch.fnmatch(Path(candidate).name, normalized) or fnmatch.fnmatch(candidate, normalized)
+
+
+def text_ignored_by_gitignore(root: Path, candidate: str) -> bool:
+    path = root / ".gitignore"
+    if not path.exists():
+        return False
+    ignored = False
+    for raw in read_text(path).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        if negated:
+            line = line[1:].strip()
+        if pattern_matches(line, candidate):
+            ignored = not negated
+    return ignored
+
+
+def is_ignored(root: Path, candidate: str) -> bool:
+    result = git(root, "check-ignore", "--no-index", "-q", "--", candidate, timeout=10)
+    if result.returncode in (0, 1):
+        return result.returncode == 0
+    return text_ignored_by_gitignore(root, candidate)
+
+
+def gitignore_missing(root: Path) -> List[str]:
+    if not (root / ".gitignore").exists():
+        return [pattern for pattern, _ in GITIGNORE_REQUIRED]
+    missing = []
+    for pattern, test_path in GITIGNORE_REQUIRED:
+        if not is_ignored(root, test_path):
+            missing.append(pattern)
+    return missing
+
+
+def dockerignore_covers(text: str, candidate: str) -> bool:
+    matched = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        negated = line.startswith("!")
+        if negated:
+            line = line[1:].strip()
+        if not line:
+            continue
+        line = line.lstrip("/")
+        patterns = [line]
+        if line.endswith("/"):
+            patterns.append(line.rstrip("/") + "/*")
+            patterns.append(line.rstrip("/") + "/**")
+        hit = any(pattern_matches(pattern, candidate) for pattern in patterns)
+        if not hit:
+            directory = line.rstrip("/")
+            hit = candidate == directory or candidate.startswith(directory + "/")
+        if hit:
+            matched = not negated
+    return matched
+
+
+# ---------------------------------------------------------------------------
+# Project checks
+# ---------------------------------------------------------------------------
+
+
+def build_project_report(
+    path: Path,
+    deep: bool = False,
+    scan_content: bool = True,
+    global_config: Optional[Dict[str, List[str]]] = None,
+) -> Report:
+    global_config = global_config if global_config is not None else read_global_config()
+    root = detect_git_root(path)
+    report = Report(f"Project: {root.name if root else path}")
+    report.meta.update({"path": str(root or path), "deep": deep, "scan_content": scan_content})
+    if root is None:
+        report.add(
+            "Repository",
+            "FAIL",
+            "Git repository",
+            f"not a repository: {path}",
+            "Choose the repository root, or use scenario C to initialize and publish it.",
+        )
+        return report
+
+    report.meta["root"] = str(root)
+    entries = status_entries(root)
+    counts = status_counts(entries)
+    tracked = tracked_files(root)
+    remotes = remote_urls(root)
+    origin_url = remotes.get("origin", "")
+    github_remote = parse_github_url(origin_url) if origin_url else None
+    branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+    detached = not branch
+    if detached:
+        branch = git_out(root, "rev-parse", "--short", "HEAD")
+
+    repository = report.section("Repository")
+    repository.checks.append(Check("PASS", "Path", str(root)))
+    if detached:
+        repository.checks.append(
+            Check(
+                "WARN",
+                "Branch",
+                f"detached HEAD at {branch or '(unknown)'}",
+                "Check out a branch before committing or pushing.",
+            )
+        )
+    else:
+        repository.checks.append(Check("PASS", "Branch", branch))
+
+    head_result = git(
+        root,
+        "log",
+        "-1",
+        "--date=short",
+        "--format=%h%x00%an%x00%ae%x00%ad%x00%s",
+        timeout=10,
+    )
+    has_commit = head_result.returncode == 0 and head_result.out.strip()
+    if has_commit:
+        parts = head_result.out.rstrip("\n").split("\0")
+        if len(parts) >= 5:
+            repository.checks.append(
+                Check(
+                    "INFO",
+                    "HEAD",
+                    f"{parts[0]} {one_line(parts[4], 80)} ({parts[1]} <{parts[2]}>, {parts[3]})",
+                )
+            )
+    else:
+        repository.checks.append(Check("INFO", "HEAD", "no commits yet"))
+
+    if counts["conflicts"]:
+        repository.checks.append(
+            Check(
+                "FAIL",
+                "Merge conflicts",
+                f"{counts['conflicts']} conflicted path(s)",
+                "Resolve conflicts, then commit. Do not force or discard work.",
+            )
+        )
+    if entries:
+        repository.checks.append(
+            Check(
+                "WARN",
+                "Working tree",
+                f"{len(entries)} changed path(s): {counts['staged']} staged, "
+                f"{counts['unstaged']} unstaged, {counts['untracked']} untracked",
+                "Review changes and use option 8 (commit and push) when ready.",
+            )
+        )
+    else:
+        repository.checks.append(Check("PASS", "Working tree", "clean"))
+
+    operations = in_progress_operations(root)
+    if operations:
+        repository.checks.append(
+            Check(
+                "FAIL",
+                "Git operation in progress",
+                ", ".join(operations),
+                "Finish or safely abort the operation before creating, renaming, or pushing.",
+            )
+        )
+    else:
+        repository.checks.append(Check("PASS", "Git operation", "none in progress"))
+
+    if is_linked_worktree(root):
+        repository.checks.append(
+            Check(
+                "INFO",
+                "Linked worktree",
+                "this checkout shares a .git directory with another worktree",
+                "Rename it with 'git worktree move' (option 9 does this automatically), not with mv.",
+            )
+        )
+
+    if deep:
+        fsck = git(root, "fsck", "--no-progress", "--connectivity-only", timeout=90)
+        if fsck.returncode == 0:
+            repository.checks.append(Check("PASS", "Object database", "git fsck connectivity check passed"))
+        else:
+            repository.checks.append(
+                Check(
+                    "WARN",
+                    "Object database",
+                    one_line(fsck.combined, 200) or "git fsck reported a problem",
+                    "Inspect the output manually. Do not delete objects until you have a backup.",
+                )
+            )
+
+    if not remotes:
+        repository.checks.append(
+            Check(
+                "WARN",
+                "Remotes",
+                "none (local-only repository)",
+                "Publish it with scenario C, or add a remote manually.",
+            )
+        )
+    elif "origin" not in remotes:
+        repository.checks.append(
+            Check(
+                "WARN",
+                "Remotes",
+                f"no origin; found: {', '.join(remotes)}",
+                "The scenarios in this tool expect a remote named origin.",
+            )
+        )
+    else:
+        repository.checks.append(Check("PASS", "Remotes", f"origin = {origin_url}"))
+
+    if origin_url:
+        if origin_url.startswith(("http://", "git://")):
+            repository.checks.append(
+                Check(
+                    "WARN",
+                    "Remote URL",
+                    origin_url,
+                    "Use SSH (git@github.com:...) or HTTPS with the recommended insteadOf rewrite.",
+                )
+            )
+        elif origin_url.startswith("https://github.com/"):
+            if signing_url_rewrite(global_config):
+                repository.checks.append(
+                    Check("PASS", "Remote URL", "HTTPS GitHub URL will be rewritten to SSH by insteadOf")
+                )
+            else:
+                repository.checks.append(
+                    Check("INFO", "Remote URL", "HTTPS GitHub URL (gh/git credential helper handles authentication)")
+                )
+        elif origin_url.startswith(("git@github.com:", "ssh://git@github.com/")):
+            repository.checks.append(Check("PASS", "Remote URL", "SSH"))
+        else:
+            repository.checks.append(Check("INFO", "Remote URL", one_line(origin_url, 120)))
+
+    upstream = git_out(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if not upstream:
+        repository.checks.append(
+            Check(
+                "WARN",
+                "Upstream branch",
+                "not set",
+                f"Set it with: git push -u origin {branch}" if not detached else "Check out a branch first.",
+            )
+        )
+    else:
+        repository.checks.append(Check("PASS", "Upstream branch", upstream))
+        count_result = git(root, "rev-list", "--left-right", "--count", f"HEAD...{upstream}", timeout=15)
+        if count_result.returncode == 0:
+            values = count_result.out.strip().split()
+            if len(values) == 2:
+                ahead, behind = int(values[0]), int(values[1])
+                if ahead and behind:
+                    repository.checks.append(
+                        Check(
+                            "WARN",
+                            "Ahead/behind",
+                            f"{ahead} ahead, {behind} behind (based on last fetch)",
+                            "Histories have diverged. Do not force. Use option 7 (scenario D) to compare them safely.",
+                        )
+                    )
+                elif behind:
+                    repository.checks.append(
+                        Check(
+                            "WARN",
+                            "Ahead/behind",
+                            f"0 ahead, {behind} behind (based on last fetch)",
+                            "A fast-forward pull is safe from a clean worktree: git pull --ff-only",
+                        )
+                    )
+                elif ahead:
+                    repository.checks.append(
+                        Check("INFO", "Ahead/behind", f"{ahead} ahead, 0 behind (based on last fetch)", "Push when ready.")
+                    )
+                else:
+                    repository.checks.append(Check("PASS", "Ahead/behind", "in sync with upstream (based on last fetch)"))
+
+    remote_default: Optional[str] = None
+    if deep and origin_url:
+        reachable, remote_default, error = check_remote_access(root)
+        if reachable:
+            repository.checks.append(Check("PASS", "Remote reachable", "origin responded"))
+        else:
+            repository.checks.append(
+                Check(
+                    "WARN",
+                    "Remote reachable",
+                    error or "could not contact origin",
+                    "Check network, SSH agent/key, and gh authentication. Offline verification can use --offline.",
+                )
+            )
+    if origin_url:
+        local_default = git_out(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
+        if local_default:
+            remote_default = remote_default or local_default.split("/", 1)[-1]
+
+    if remote_default:
+        if not detached and branch == remote_default:
+            repository.checks.append(Check("PASS", "Default branch", remote_default))
+        else:
+            repository.checks.append(
+                Check(
+                    "INFO",
+                    "Default branch",
+                    f"remote default is {remote_default}; current branch is {branch}",
+                )
+            )
+
+    if deep and github_remote:
+        gh_info, gh_error = gh_repo_info(root)
+        if gh_info:
+            visibility = str(gh_info.get("visibility") or ("private" if gh_info.get("isPrivate") else "unknown"))
+            repository.checks.append(
+                Check("PASS", "GitHub repository", f"{gh_info.get('nameWithOwner')} ({visibility})")
+            )
+            github_name = str(gh_info.get("nameWithOwner", "")).split("/")[-1]
+            if github_name and github_name != root.name:
+                repository.checks.append(
+                    Check(
+                        "INFO",
+                        "Folder/repository name",
+                        f"local folder '{root.name}' differs from GitHub repository '{github_name}'",
+                        "Use option 9 to rename the local folder and/or the GitHub repository.",
+                    )
+                )
+            default_ref = gh_info.get("defaultBranchRef") or {}
+            if isinstance(default_ref, dict) and default_ref.get("name"):
+                gh_default = str(default_ref["name"])
+                if not detached and branch != gh_default:
+                    repository.checks.append(
+                        Check("INFO", "GitHub default branch", f"{gh_default}; current branch is {branch}")
+                    )
+        else:
+            repository.checks.append(
+                Check(
+                    "WARN",
+                    "GitHub repository",
+                    gh_error or "could not read repository metadata",
+                    "Check: gh auth status && gh repo view",
+                )
+            )
+
+    if has_commit:
+        signature_result = git(root, "log", "-1", "--format=%G?%x00%GS%x00%h%x00%s", timeout=10)
+        if signature_result.returncode == 0:
+            sig_parts = signature_result.out.rstrip("\n").split("\0")
+            status_code = sig_parts[0].strip() if sig_parts else ""
+            signer = sig_parts[1] if len(sig_parts) > 1 else ""
+            short_hash = sig_parts[2] if len(sig_parts) > 2 else ""
+            subject = one_line(sig_parts[3], 70) if len(sig_parts) > 3 else ""
+            if status_code == "G":
+                repository.checks.append(
+                    Check("PASS", "HEAD signature", f"good signature by {signer or 'unknown signer'} ({short_hash} {subject})")
+                )
+            elif status_code == "U":
+                repository.checks.append(
+                    Check(
+                        "WARN",
+                        "HEAD signature",
+                        "good signature, but signer is not trusted locally",
+                        "Configure gpg.ssh.allowedSignersFile and add your public key.",
+                    )
+                )
+            elif status_code == "B":
+                repository.checks.append(
+                    Check("FAIL", "HEAD signature", "BAD signature", "Investigate before trusting or pushing this commit.")
+                )
+            elif status_code in ("X", "Y", "R"):
+                repository.checks.append(
+                    Check("FAIL", "HEAD signature", f"signature problem ({status_code})", "The signing key may be expired or revoked.")
+                )
+            elif status_code == "E":
+                repository.checks.append(
+                    Check(
+                        "WARN",
+                        "HEAD signature",
+                        "signature could not be verified",
+                        "Check gpg.format, user.signingkey, and gpg.ssh.allowedSignersFile.",
+                    )
+                )
+            else:
+                repository.checks.append(
+                    Check(
+                        "INFO",
+                        "HEAD signature",
+                        "HEAD is not signed",
+                        "New commits are signed when commit.gpgsign=true and the SSH key is configured.",
+                    )
+                )
+
+    settings = report.section("Project settings")
+    effective_name = git_out(root, "config", "--get", "user.name")
+    effective_email = git_out(root, "config", "--get", "user.email")
+    if effective_name and effective_email and EMAIL_RE.match(effective_email):
+        settings.checks.append(Check("PASS", "Effective identity", f"{effective_name} <{effective_email}>"))
+    else:
+        settings.checks.append(
+            Check(
+                "FAIL",
+                "Effective identity",
+                f"name={effective_name or '(missing)'}, email={effective_email or '(missing)'}",
+                "Set a global or local Git identity before committing.",
+            )
+        )
+
+    local_config = read_local_config(root)
+    overrides = [
+        key
+        for key in ("user.name", "user.email", "user.signingkey", "commit.gpgsign", "gpg.format", "core.sshcommand")
+        if key in local_config
+    ]
+    if overrides:
+        settings.checks.append(
+            Check(
+                "INFO",
+                "Local overrides",
+                ", ".join(overrides),
+                "Local .git/config values override global settings in this repository.",
+            )
+        )
+        local_email = cfg_get(local_config, "user.email")
+        global_email = cfg_get(global_config, "user.email")
+        if local_email and global_email and local_email != global_email:
+            settings.checks.append(
+                Check(
+                    "WARN",
+                    "Local email override",
+                    f"local={local_email}, global={global_email}",
+                    "Make sure this address is the one you intend to use for this repository.",
+                )
+            )
+
+    effective_signing = git_out(root, "config", "--get", "commit.gpgsign").lower() == "true"
+    effective_format = git_out(root, "config", "--get", "gpg.format").lower()
+    effective_key = git_out(root, "config", "--get", "user.signingkey")
+    key_path, key_text, key_error = resolve_public_key(effective_key) if effective_key else (None, None, "not set")
+    if effective_signing and effective_format == "ssh" and key_text and not key_error:
+        settings.checks.append(
+            Check("PASS", "Effective commit signing", f"SSH key: {key_path or 'inline key'}")
+        )
+    else:
+        settings.checks.append(
+            Check(
+                "WARN",
+                "Effective commit signing",
+                f"commit.gpgsign={'true' if effective_signing else 'false/not set'}, "
+                f"gpg.format={effective_format or 'not set'}, "
+                f"signing key={key_error or 'configured'}",
+                "Configure SSH commit signing (option 10) so commits are verifiable.",
+            )
+        )
+
+    allowed_effective = git_out(root, "config", "--get", "gpg.ssh.allowedSignersFile")
+    if allowed_effective:
+        allowed_path = find_existing_path(allowed_effective)
+        if allowed_path and allowed_path.is_file():
+            settings.checks.append(Check("PASS", "Local signature verification", str(allowed_path)))
+        else:
+            settings.checks.append(
+                Check(
+                    "WARN",
+                    "Local signature verification",
+                    f"allowedSignersFile missing: {allowed_effective}",
+                    "Run option 10 to create/configure it.",
+                )
+            )
+
+    files = report.section("Important files")
+    readme = find_readme(root)
+    files.checks.append(
+        Check("PASS", "README", str(readme.name)) if readme else Check("WARN", "README", "missing", "Add a README.md describing the project.")
+    )
+    gitignore = root / ".gitignore"
+    files.checks.append(
+        Check("FAIL", ".gitignore", "missing", "Create it before staging files. Use option 11.")
+        if not gitignore.exists()
+        else Check("PASS", ".gitignore", "present")
+    )
+    dockerignore = root / ".dockerignore"
+    docker = dockerfile_present(root)
+    if dockerignore.exists():
+        files.checks.append(Check("PASS", ".dockerignore", "present"))
+    elif docker:
+        files.checks.append(
+            Check("WARN", ".dockerignore", "missing (Dockerfile detected)", "Create it with option 11 to keep secrets and .git out of images.")
+        )
+    else:
+        files.checks.append(
+            Check(
+                "WARN",
+                ".dockerignore",
+                "missing (no Dockerfile detected yet)",
+                "Create it with option 11 when containerizing; the template keeps .git, secrets, dependencies, and build output out of the context.",
+            )
+        )
+
+    license_file = find_license(root)
+    files.checks.append(
+        Check("PASS", "LICENSE", license_file.name)
+        if license_file
+        else Check("INFO", "LICENSE", "not found", "Choose a license if you plan to publish the project.")
+    )
+    env_file = root / ".env"
+    env_example = root / ".env.example"
+    if env_file.exists():
+        if env_example.exists():
+            files.checks.append(Check("PASS", ".env.example", "present"))
+        else:
+            files.checks.append(
+                Check("WARN", ".env.example", "missing while .env exists", "Generate a blank-key template with option 11.")
+            )
+    elif env_example.exists():
+        files.checks.append(Check("PASS", ".env.example", "present"))
+    else:
+        files.checks.append(Check("INFO", ".env.example", "not present", "Optional until the project uses environment variables."))
+    files.checks.append(
+        Check("PASS", ".editorconfig", "present")
+        if (root / ".editorconfig").exists()
+        else Check("INFO", ".editorconfig", "not present", "Optional; option 11 can add one.")
+    )
+    files.checks.append(
+        Check("PASS", ".gitattributes", "present")
+        if (root / ".gitattributes").exists()
+        else Check("INFO", ".gitattributes", "not present", "Optional; useful for line endings and Git LFS rules.")
+    )
+    security_file = root / "SECURITY.md"
+    files.checks.append(
+        Check("PASS", "SECURITY.md", "present")
+        if security_file.exists()
+        else Check("INFO", "SECURITY.md", "not present", "Optional; useful for public repositories.")
+    )
+    workflows_dir = root / ".github" / "workflows"
+    workflows = list(workflows_dir.glob("*.yml")) + list(workflows_dir.glob("*.yaml")) if workflows_dir.is_dir() else []
+    files.checks.append(
+        Check("PASS", "CI workflows", f"{len(workflows)} workflow file(s)")
+        if workflows
+        else Check("INFO", "CI workflows", "none found", "Optional; add CI for tests and secret scanning.")
+    )
+
+    if has_commit and gitignore.exists() and ".gitignore" not in tracked:
+        files.checks.append(Check("WARN", ".gitignore tracked", "file exists but is not committed", "Commit it so collaborators get the same rules."))
+    if has_commit and readme and readme.name not in tracked:
+        files.checks.append(Check("WARN", "README tracked", "file exists but is not committed", "Commit it so the repository has project documentation."))
+
+    ignore_rules = report.section("Ignore rules")
+    missing_patterns = gitignore_missing(root)
+    if not gitignore.exists():
+        ignore_rules.checks.append(
+            Check("FAIL", ".gitignore coverage", "no .gitignore file", "Create one with option 11 before committing secrets by accident.")
+        )
+    elif missing_patterns:
+        ignore_rules.checks.append(
+            Check(
+                "WARN",
+                ".gitignore coverage",
+                "missing rules for: " + ", ".join(missing_patterns),
+                "Use option 11 to append missing secret rules. Review build-directory rules manually.",
+            )
+        )
+    else:
+        ignore_rules.checks.append(Check("PASS", ".gitignore coverage", "secret and common build patterns covered"))
+
+    if env_file.exists() and not is_ignored(root, ".env"):
+        ignore_rules.checks.append(
+            Check("FAIL", ".env ignored", ".env exists but is not ignored", "Add .env to .gitignore before staging anything.")
+        )
+    elif env_file.exists():
+        ignore_rules.checks.append(Check("PASS", ".env ignored", "yes"))
+    if env_example.exists() and is_ignored(root, ".env.example"):
+        ignore_rules.checks.append(
+            Check("FAIL", ".env.example ignored", "the example file is ignored", "Add !.env.example after the .env.* rule.")
+        )
+
+    if docker and dockerignore.exists():
+        docker_text = read_text(dockerignore)
+        candidates = [".git/config", ".env", "node_modules/x", ".venv/x", "secret.pem", "secret.key"]
+        missing_docker = [candidate for candidate in candidates if not dockerignore_covers(docker_text, candidate)]
+        if missing_docker:
+            ignore_rules.checks.append(
+                Check(
+                    "WARN",
+                    ".dockerignore coverage",
+                    "missing: " + ", ".join(missing_docker),
+                    "Keep .git, environment files, keys, dependencies, and build output out of the Docker context.",
+                )
+            )
+        else:
+            ignore_rules.checks.append(Check("PASS", ".dockerignore coverage", "core secrets and build directories covered"))
+
+    safety = report.section("Safety")
+    sensitive_tracked = [path for path in tracked if is_sensitive_name(path)]
+    if sensitive_tracked:
+        safety.checks.append(
+            Check(
+                "FAIL",
+                "Sensitive files tracked",
+                ", ".join(sensitive_tracked[:8]) + (" ..." if len(sensitive_tracked) > 8 else ""),
+                "Remove them from the index, rotate any exposed credentials, and add ignore rules. If already pushed, history rewriting is required.",
+            )
+        )
+    else:
+        safety.checks.append(Check("PASS", "Sensitive files tracked", "none detected"))
+
+    sensitive_untracked = [
+        entry.path for entry in entries if entry.code == "??" and is_sensitive_name(entry.path)
+    ]
+    if sensitive_untracked:
+        safety.checks.append(
+            Check(
+                "WARN",
+                "Sensitive files untracked",
+                ", ".join(sensitive_untracked[:8]),
+                "These are not committed, but make sure they are ignored. Option 11 can repair .gitignore.",
+            )
+        )
+    else:
+        safety.checks.append(Check("PASS", "Sensitive files untracked", "none detected"))
+
+    if env_file.exists():
+        try:
+            env_mode = stat.S_IMODE(env_file.stat().st_mode)
+        except OSError:
+            env_mode = 0
+        if env_mode & 0o077:
+            safety.checks.append(
+                Check(
+                    "WARN",
+                    ".env permissions",
+                    f"too open ({oct(env_mode)})",
+                    f"Run: chmod 600 {env_file}",
+                )
+            )
+        else:
+            safety.checks.append(Check("PASS", ".env permissions", oct(env_mode)))
+
+    if scan_content:
+        findings, truncated = scan_secret_content(root, tracked)
+        if findings:
+            high_risk = any(item[3] for item in findings)
+            detail = ", ".join(f"{path}:{line} ({kind})" for path, line, kind, _ in findings[:8])
+            if len(findings) > 8:
+                detail += " ..."
+            safety.checks.append(
+                Check(
+                    "FAIL" if high_risk else "WARN",
+                    "Potential secrets in tracked files",
+                    detail,
+                    "Review these findings. Remove real secrets, rotate them, and use an ignored .env or a secret manager. "
+                    "If content was already pushed, rotate first and then consider git filter-repo.",
+                )
+            )
+        else:
+            safety.checks.append(Check("PASS", "Secret content scan", "no common secret patterns found"))
+        if truncated:
+            safety.checks.append(Check("INFO", "Secret content scan", "scan limit reached; review large/binary files manually"))
+
+    large_files = large_tracked_files(root, tracked)
+    very_large = [(name, size) for name, size in large_files if size >= 95 * 1024 * 1024]
+    large = [(name, size) for name, size in large_files if 50 * 1024 * 1024 <= size < 95 * 1024 * 1024]
+    if very_large:
+        safety.checks.append(
+            Check(
+                "FAIL",
+                "GitHub file-size limit",
+                ", ".join(f"{name} ({format_size(size)})" for name, size in very_large[:5]),
+                "GitHub rejects files of 100 MiB or more. Use Git LFS or remove the file from history.",
+            )
+        )
+    elif large:
+        safety.checks.append(
+            Check(
+                "WARN",
+                "Large tracked files",
+                ", ".join(f"{name} ({format_size(size)})" for name, size in large[:5]),
+                "GitHub warns above 50 MiB. Consider Git LFS, and never commit generated binaries casually.",
+            )
+        )
+    else:
+        safety.checks.append(Check("PASS", "Large tracked files", "none above 50 MiB"))
+
+    lock_path = git_path(root, "index.lock")
+    if lock_path.exists():
+        safety.checks.append(
+            Check(
+                "WARN",
+                "index.lock",
+                str(lock_path),
+                "Another Git process may be running. Do not delete the lock until you are sure no Git process is active.",
+            )
+        )
+    else:
+        safety.checks.append(Check("PASS", "index.lock", "none"))
+
+    return report
+
+
+def combined_report(
+    path: Path,
+    deep: bool,
+    scan_content: bool,
+    config: Optional[Dict[str, List[str]]] = None,
+) -> Report:
+    config = config if config is not None else read_global_config()
+    report = Report(f"Verification: {path.name}")
+    report.meta.update({"path": str(path), "deep": deep, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    report.extend(build_global_report(config, deep=deep))
+    report.extend(build_project_report(path, deep=deep, scan_content=scan_content, global_config=config))
+    return report
+
+
+def print_quick_check(project: Optional[Path]) -> None:
+    config = read_global_config()
+    report = Report("Quick check")
+    report.extend(build_global_report(config, deep=False))
+    if project:
+        report.extend(build_project_report(project, deep=False, scan_content=False, global_config=config))
+    problems = [check for check in report.checks() if check.level in ("FAIL", "WARN")]
+    print()
+    print(col("Quick check", "bold") + col(" (local, no network)", "dim"))
+    if not problems:
+        success("No blocking issues found. Run option 1 for a full verification including network checks.")
+        return
+    for check in problems[:12]:
+        print_check(check, show_hint=check.level == "FAIL")
+    if len(problems) > 12:
+        print(col(f"  ... and {len(problems) - 12} more. Run option 1 for the full report.", "dim"))
+    counts = report.counts()
+    print(
+        "  "
+        + col(f"{counts['FAIL']} failure(s)", "red")
+        + ", "
+        + col(f"{counts['WARN']} warning(s)", "yellow")
+        + col(" - select option 1 for details and fixes.", "dim")
+    )
+
+
+# ---------------------------------------------------------------------------
+# Interactive input helpers
+# ---------------------------------------------------------------------------
+
+
+def ask(prompt: str, default: Optional[str] = None, allow_empty: bool = False) -> str:
+    suffix = f" [{default}]" if default not in (None, "") else ""
+    while True:
+        try:
+            value = input(f"{prompt}{suffix}: ").strip()
+        except EOFError:
+            raise
+        if value:
+            return value
+        if default is not None:
+            return default
+        if allow_empty:
+            return ""
+        print("A value is required.")
+
+
+def ask_email(prompt: str, default: Optional[str] = None) -> str:
+    while True:
+        value = ask(prompt, default=default)
+        if EMAIL_RE.match(value):
+            return value
+        warning("That does not look like a valid email address.")
+
+
+def ask_path(prompt: str, default: Optional[Path] = None) -> Path:
+    default_text = str(default) if default else None
+    raw = ask(prompt, default=default_text)
+    path = Path(os.path.expanduser(os.path.expandvars(raw)))
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def confirm(prompt: str, default: bool = False) -> bool:
+    suffix = "[Y/n]" if default else "[y/N]"
+    try:
+        value = input(f"{prompt} {suffix}: ").strip().lower()
+    except EOFError:
+        raise
+    if not value:
+        return default
+    return value in ("y", "yes", "j", "ja")
+
+
+def validate_repo_name(name: str) -> bool:
+    return bool(REPO_NAME_RE.match(name)) and name not in (".", "..") and not name.startswith("-")
+
+
+def ask_repo_name(prompt: str, default: str) -> str:
+    while True:
+        name = ask(prompt, default=default)
+        if validate_repo_name(name):
+            return name
+        warning("Use 1-100 characters: letters, numbers, dot, dash, underscore. No spaces or slashes.")
+
+
+def ask_visibility(default: str = "private") -> str:
+    while True:
+        value = ask("Visibility [private/public]", default=default).lower()
+        if value in ("private", "public"):
+            return value
+        warning("Choose private or public.")
+
+
+# ---------------------------------------------------------------------------
+# File management helpers
+# ---------------------------------------------------------------------------
+
+
+def write_new_file(path: Path, content: str, label: str) -> bool:
+    if path.exists():
+        info(f"{label} already exists: {path}")
+        return False
+    try:
+        path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
+    except OSError as exc:
+        failure(f"could not write {path}: {exc}")
+        return False
+    success(f"created {path}")
+    return True
+
+
+def ensure_gitignore(root: Path, ask_first: bool = True) -> bool:
+    path = root / ".gitignore"
+    if not path.exists():
+        if ask_first and not confirm("Create a new .gitignore with secret/build rules?", True):
+            return False
+        return write_new_file(path, GITIGNORE_TEMPLATE, ".gitignore")
+
+    # Check the example path even when it does not exist yet. A broad .env.*
+    # rule would otherwise hide a future .env.example.
+    example_ignored = is_ignored(root, ".env.example")
+    additions = [
+        line
+        for line in SECRET_APPEND_LINES
+        if not is_ignored(root, SECRET_TEST_PATH[line])
+    ]
+    if example_ignored or ".env.*" in additions:
+        if "!.env.example" not in additions:
+            additions.append("!.env.example")
+    if not additions:
+        success(".gitignore already covers the important secret patterns.")
+        return False
+    print("Missing secret rules: " + ", ".join(additions))
+    if not confirm("Append these rules to .gitignore?", True):
+        return False
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        block = prefix + "\n# git-create: secret and safety patterns\n" + "\n".join(additions) + "\n"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+    except OSError as exc:
+        failure(f"could not update .gitignore: {exc}")
+        return False
+    success(f"updated {path}")
+    return True
+
+
+def ensure_dockerignore(root: Path, ask_first: bool = True) -> bool:
+    path = root / ".dockerignore"
+    if path.exists():
+        info(f".dockerignore already exists: {path}")
+        return False
+    if ask_first and not confirm("Create a .dockerignore template?", True):
+        return False
+    return write_new_file(path, DOCKERIGNORE_TEMPLATE, ".dockerignore")
+
+
+def ensure_readme(root: Path, ask_first: bool = True) -> bool:
+    existing = find_readme(root)
+    if existing:
+        info(f"README already exists: {existing}")
+        return False
+    if ask_first and not confirm("Create a minimal README.md?", True):
+        return False
+    description = ask("Short project description (optional)", allow_empty=True)
+    content = README_TEMPLATE.format(
+        name=root.name,
+        description=description or "A short description of the project.",
+    )
+    return write_new_file(root / "README.md", content, "README.md")
+
+
+def ensure_editorconfig(root: Path, ask_first: bool = True) -> bool:
+    path = root / ".editorconfig"
+    if path.exists():
+        info(f".editorconfig already exists: {path}")
+        return False
+    if ask_first and not confirm("Create a .editorconfig template?", True):
+        return False
+    return write_new_file(path, EDITORCONFIG_TEMPLATE, ".editorconfig")
+
+
+def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
+    target = root / ".env.example"
+    source = root / ".env"
+    if target.exists():
+        if is_ignored(root, ".env.example"):
+            warning(".env.example exists but is ignored; repairing .gitignore.")
+            ensure_gitignore(root)
+        info(f".env.example already exists: {target}")
+        return False
+    if not source.exists():
+        info("No .env file found, so there is nothing to derive.")
+        return False
+    if not is_ignored(root, ".env"):
+        warning(".env is not ignored; repairing .gitignore before creating .env.example.")
+        ensure_gitignore(root)
+        if not is_ignored(root, ".env"):
+            failure(".env is still not ignored. Add .env to .gitignore manually, then try again.")
+            return False
+    keys: List[str] = []
+    try:
+        for line in source.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = re.match(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+            if match and match.group(1) not in keys:
+                keys.append(match.group(1))
+    except OSError as exc:
+        failure(f"could not read .env: {exc}")
+        return False
+    if not keys:
+        warning("No variable names found in .env.")
+        if not confirm("Create a header-only .env.example?", True):
+            return False
+    if is_ignored(root, ".env.example"):
+        warning("The current .gitignore would hide .env.example; adding an explicit exception.")
+        ensure_gitignore(root)
+        if is_ignored(root, ".env.example"):
+            failure(".env.example is still ignored. Add '!.env.example' after the .env.* rule, then retry.")
+            return False
+    if ask_first and not confirm(f"Create .env.example with {len(keys)} blank key(s)?", True):
+        return False
+    lines = [
+        "# Generated by git-create from .env.",
+        "# Values are intentionally blank; fill in local values in .env.",
+        "",
+    ]
+    lines.extend(f"{key}=" for key in keys)
+    return write_new_file(target, "\n".join(lines) + "\n", ".env.example")
+
+
+def print_file_checklist(root: Path) -> None:
+    readme = find_readme(root)
+    checks = [
+        ("README", "yes" if readme else "missing"),
+        (".gitignore", "yes" if (root / ".gitignore").exists() else "MISSING"),
+        (".dockerignore", "yes" if (root / ".dockerignore").exists() else "missing"),
+        ("LICENSE", "yes" if find_license(root) else "missing"),
+        (".env.example", "yes" if (root / ".env.example").exists() else "not present"),
+        (".editorconfig", "yes" if (root / ".editorconfig").exists() else "missing"),
+    ]
+    for label, value in checks:
+        print(f"  {label:16} {value}")
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+
+class App:
+    def __init__(self) -> None:
+        # The current directory is the source of truth. This makes the tool
+        # automatic when it is copied into a project root and run from there.
+        # It also avoids silently selecting the tool's own repository when the
+        # script is installed elsewhere and started from an unrelated folder.
+        self.project = detect_git_root(Path.cwd())
+
+    # -- menu ---------------------------------------------------------------
+
+    def run(self) -> int:
+        print()
+        print(col(f"{APP} {VERSION}", "bold") + col(" - safe Git/GitHub project assistant", "dim"))
+        if self.project:
+            print("Active project: " + col(str(self.project), "cyan"))
+        else:
+            print(col("No Git repository detected in the current directory.", "yellow"))
+        print(col("New to Git? Option 12 explains the concepts, commands, and why they are used.", "dim"))
+        print_quick_check(self.project)
+        while True:
+            try:
+                self.refresh_project()
+                self.print_menu()
+                choice = ask("Choose an option", default="0", allow_empty=True)
+                if choice in ("0", "q", "quit", "exit"):
+                    print("Bye.")
+                    return 0
+                actions = {
+                    "1": self.verify_current,
+                    "2": self.scan_action,
+                    "3": self.select_project,
+                    "4": self.scenario_a,
+                    "5": self.scenario_b,
+                    "6": self.scenario_c,
+                    "7": self.scenario_d,
+                    "8": self.commit_and_push_action,
+                    "9": self.rename_action,
+                    "10": self.settings_action,
+                    "11": self.files_action,
+                    "12": self.help_action,
+                }
+                action = actions.get(choice)
+                if action is None:
+                    warning("Unknown option.")
+                else:
+                    action()
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                continue
+            except EOFError:
+                print("\nInput closed; exiting.")
+                return 0
+
+    def refresh_project(self) -> None:
+        if self.project is None:
+            return
+        root = detect_git_root(self.project)
+        if root is None:
+            warning(f"Active project is no longer a Git repository: {self.project}")
+            self.project = None
+        else:
+            self.project = root
+
+    def project_summary(self) -> str:
+        if not self.project:
+            return "none"
+        branch = git_out(self.project, "symbolic-ref", "--short", "-q", "HEAD") or "detached"
+        entries = status_entries(self.project)
+        state = "clean" if not entries else f"{len(entries)} change(s)"
+        return f"{self.project} ({branch}, {state})"
+
+    def print_menu(self) -> None:
+        print()
+        print(col("Active project", "bold") + ": " + self.project_summary())
+        print(col("-" * 78, "dim"))
+        items = [
+            ("1", "Verify active project (full check)"),
+            ("2", "Scan a folder for Git repositories"),
+            ("3", "Select active project"),
+            ("4", "Scenario A: create a new GitHub repo and clone it"),
+            ("5", "Scenario B: clone an existing GitHub repo"),
+            ("6", "Scenario C: publish an existing local project"),
+            ("7", "Scenario D: diagnose local/remote history (no force)"),
+            ("8", "Commit and push changes"),
+            ("9", "Rename local folder and/or GitHub repository"),
+            ("10", "Check/fix global Git and GitHub settings"),
+            ("11", "Check/add important project files"),
+            ("12", "Help: Git concepts, commands, scenarios, safety"),
+            ("0", "Exit"),
+        ]
+        for number, label in items:
+            print(f"  {number:>2}) {label}")
+
+    def require_project(self) -> Optional[Path]:
+        self.refresh_project()
+        if self.project is None:
+            warning("No active project. Use option 3 to select one, or options 4-6 to create/clone/publish.")
+            return None
+        return self.project
+
+    def help_action(self) -> None:
+        heading("Git in plain English")
+        print(
+            textwrap.dedent(
+                """\
+                Repository      The .git folder that stores history and settings.
+                Working tree    The files you see and edit.
+                Staging area    A waiting room: git add puts changes here.
+                Commit          A saved snapshot of the staging area.
+                Branch          A movable name pointing at a line of commits.
+                Remote          A copy of the repository elsewhere, usually origin on GitHub.
+                Upstream        The remote branch your current branch tracks.
+                Fetch           Downloads remote information without changing your files.
+                Pull            Fetches and moves your branch forward; --ff-only forbids a merge commit.
+                Push            Uploads your local commits to the remote branch.
+
+                working tree --git add--> staging area --git commit--> local repo --git push--> remote
+
+                A commit records the staging area, not automatically every file in the
+                folder. That is why the app shows what is staged, scans it for secrets,
+                and asks before committing.
+
+                If local and remote both have commits the other lacks, the histories are
+                diverged. That is not a reason to force-push. It is a reason to compare
+                the graph, keep a backup, and merge or rebase deliberately.
+                """
+            )
+        )
+        heading("What the commands do and why")
+        print(
+            textwrap.dedent(
+                """\
+                git config --global       Read/write your personal Git settings.
+                                          Why: identity, safer defaults, and SSH signing
+                                          should be set once for every repository.
+
+                git init -b main          Create a new .git repository on branch main.
+                                          Why: Git needs a repository before it can track
+                                          or commit anything.
+
+                git status                Show changed, staged, and untracked files.
+                                          Why: review reality before acting.
+
+                git add                   Put selected changes into the staging area.
+                                          Why: choose exactly what the next commit contains.
+
+                git diff --cached        Show what is staged for the next commit.
+                                          Why: verify the snapshot before saving it.
+
+                git commit                Save the staged snapshot as a signed commit.
+                                          Why: create a reviewable checkpoint; nothing is
+                                          uploaded yet.
+
+                git fetch                 Download remote refs without changing your branch.
+                                          Why: compare local and remote history safely.
+
+                git pull --ff-only        Fast-forward only; refuse to create a merge commit.
+                                          Why: update a branch without hiding divergence.
+
+                git push                  Upload local commits to the remote branch.
+                                          Why: share history with GitHub. The app never forces.
+
+                git log / git branch      Inspect history, branches, and backup points.
+                                          Why: understand the current state before changing it.
+
+                git merge-base            Find the common ancestor of two histories.
+                                          Why: distinguish unrelated repositories from
+                                          histories that merely diverged.
+
+                git fsck                  Check object-database integrity.
+                                          Why: detect missing or corrupt repository objects.
+
+                gh repo create            Create a GitHub repository and optionally push.
+                gh repo clone             Clone a GitHub repository using gh authentication.
+                gh repo rename            Rename the GitHub repository and update origin.
+                gh auth login/refresh     Authenticate gh or add OAuth scopes.
+                gh api user/ssh_signing_keys
+                                          Read the signing keys registered on GitHub.
+                """
+            )
+        )
+        heading("Why the app checks things")
+        print(
+            textwrap.dedent(
+                """\
+                Identity        Commits with a missing or wrong author are hard to fix.
+                Default branch  A consistent main branch avoids main/master confusion.
+                pull.ff only    Prevents an accidental merge commit during a pull.
+                SSH signing     Proves a commit came from your key and was not changed.
+                allowed_signers Lets Git verify SSH signatures locally.
+                URL rewrite     Makes HTTPS GitHub URLs use your SSH identity.
+                .gitignore      Keeps secrets and build output out of Git history.
+                .dockerignore   Keeps secrets and .git out of Docker build contexts.
+                Remote check    Confirms fetch/push targets and detects divergence.
+                Secret scan     Catches common private-key and token patterns before commit.
+                """
+            )
+        )
+        heading("Scenario guide")
+        print(
+            textwrap.dedent(
+                """\
+                A) New private GitHub repository, then clone it
+                   Best when you have no code yet and want a safe starting point.
+                   gh repo create NAME --private --add-readme --clone
+
+                B) Clone a repository that already exists
+                   gh repo clone OWNER/REPO
+                   or: git clone git@github.com:OWNER/REPO.git
+
+                C) Existing local project becomes a new GitHub repository
+                   Creates .gitignore first, initializes main, reviews/stages files,
+                   signs the initial commit, then creates the remote and pushes.
+
+                D) Local and remote repositories both exist
+                   Fetches, shows graph/branches/merge-base, creates an optional local
+                   backup branch, and never force-pushes.
+
+                Rename (option 9)
+                   Renames the local folder and/or the GitHub repository. GitHub
+                   redirects the old name, and the local origin URL is repaired if
+                   needed. A rename does not require a commit.
+
+                Commit and push (option 8)
+                   Shows changes, stages all or selected paths, scans staged files
+                   for secrets, commits with SSH signing, then performs a normal
+                   (never force) push.
+
+                Global settings (option 10)
+                   Checks identity, default branch, pull.ff, push.default,
+                   fetch.prune, editor, SSH commit signing, allowed signers,
+                   GitHub URL rewrite, and gh authentication.
+                """
+            )
+        )
+        heading("Command line")
+        print(
+            textwrap.dedent(
+                """\
+                git-create check [PATH] [--offline] [--json] [--strict]
+                git-create scan [PATH] [--depth N] [--json]
+                git-create --version
+                git-create --help
+
+                Exit code for 'check': 0 = no failures, 1 = failure(s), 2 = no repository.
+                Warnings do not fail unless --strict is used.
+                """
+            )
+        )
+        heading("Safety rules")
+        print(
+            textwrap.dedent(
+                """\
+                - No force push and no automatic history rewrite.
+                - No project file is overwritten; missing templates are only created.
+                - Sensitive filenames and common secret patterns are checked before commits.
+                - Diverged histories are diagnosed, not "fixed" automatically.
+                - A local backup branch is offered before scenario D changes anything.
+                """
+            )
+        )
+
+    # -- verification -------------------------------------------------------
+
+    def verify_path(self, path: Path, deep: Optional[bool] = None) -> Report:
+        root = detect_git_root(path)
+        if root is None:
+            failure(f"Not a Git repository: {path}")
+            return Report("Verification")
+        if deep is None:
+            deep = confirm("Include network checks (remote, GitHub, signing-key registration)?", True)
+        info("Verification is read-only: it does not change config, files, commits, or remotes.")
+        if deep:
+            info("Deep checks also contact the remote and GitHub, run git fsck, and verify signing-key registration.")
+        print(col("Running verification...", "dim"))
+        sys.stdout.flush()
+        report = combined_report(root, deep=deep, scan_content=True)
+        print_report(report)
+        self.offer_fixes(report)
+        return report
+
+    def verify_current(self) -> None:
+        project = self.require_project()
+        if project:
+            self.verify_path(project)
+
+    def offer_fixes(self, report: Report) -> None:
+        checks = report.checks()
+        if any(check.level in ("FAIL", "WARN") for check in checks if "tracked files" in check.label and "Sensitive" in check.label):
+            failure("Sensitive files are already tracked. Fix this before making another commit; if they were pushed, rotate the credentials.")
+        global_problem = any(
+            check.level in ("FAIL", "WARN")
+            for section in report.sections
+            if section.title.startswith("Global")
+            for check in section.checks
+        )
+        files_problem = any(
+            check.level in ("FAIL", "WARN")
+            for section in report.sections
+            if section.title in ("Important files", "Ignore rules")
+            for check in section.checks
+        )
+        if global_problem and confirm("Open the global settings wizard now?", False):
+            self.settings_action()
+        if files_problem and confirm("Open the project-files wizard now?", False):
+            self.files_action()
+
+    # -- project selection and scanning ------------------------------------
+
+    def select_project(self) -> None:
+        default = self.project
+        if default is None:
+            default = DEFAULT_PROJECTS if DEFAULT_PROJECTS.exists() else Path.cwd()
+        path = ask_path("Project directory", default=default)
+        root = detect_git_root(path)
+        if root is None:
+            failure(f"No Git repository found at or above {path}.")
+            info("Use option 2 to scan a folder, or option 6 to publish a local project.")
+            return
+        self.project = root
+        success(f"Active project: {root}")
+
+    def scan_action(self) -> None:
+        if self.project:
+            default = self.project.parent
+        elif DEFAULT_PROJECTS.exists():
+            default = DEFAULT_PROJECTS
+        else:
+            default = Path.cwd()
+        path = ask_path("Folder to scan", default=default)
+        if not path.exists() or not path.is_dir():
+            failure(f"Not a directory: {path}")
+            return
+        depth_text = ask("Maximum depth", default=str(DEFAULT_DEPTH))
+        try:
+            depth = max(1, min(int(depth_text), 10))
+        except ValueError:
+            depth = DEFAULT_DEPTH
+        explain(
+            "Walks the selected folder down to the requested depth and looks for .git "
+            "repositories, then reads their branch, status, upstream, and last commit.",
+            "A quick overview helps you find projects, notice dirty worktrees, and choose "
+            "the right repository before running dangerous or remote-changing actions.",
+            "Scanning is read-only. It does not fetch, commit, modify, or push anything.",
+        )
+        repos = scan_repositories(path, depth)
+        print_scan_results(path, repos, depth)
+        if not repos:
+            return
+        choice = ask("Number to make active and verify (Enter to return)", allow_empty=True)
+        if not choice:
+            return
+        try:
+            index = int(choice)
+            if not 1 <= index <= len(repos):
+                raise IndexError
+            selected = repos[index - 1]
+        except (ValueError, IndexError):
+            warning("Invalid selection.")
+            return
+        self.project = Path(selected["path"])
+        success(f"Active project: {self.project}")
+        if confirm("Run verification now?", True):
+            self.verify_path(self.project)
+
+    def scenario_a(self) -> None:
+        heading("Scenario A - new GitHub repository and clone")
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        default_parent = DEFAULT_PROJECTS if DEFAULT_PROJECTS.exists() else Path.cwd()
+        parent = ask_path("Parent folder", default=default_parent)
+        if not parent.exists():
+            if not confirm(f"Create parent folder {parent}?", True):
+                return
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                failure(f"Could not create {parent}: {exc}")
+                return
+        name = ask_repo_name("Repository name", default="my-project")
+        target = parent / name
+        if target.exists():
+            failure(f"Destination already exists: {target}")
+            info("Choose another name, or use scenario B/C/D for the existing directory.")
+            return
+        visibility = ask_visibility("private")
+        description = ask("Description (optional)", allow_empty=True)
+        command = [which_gh() or "gh", "repo", "create", name, f"--{visibility}", "--add-readme", "--clone"]
+        if description:
+            command.extend(["--description", description])
+        explain(
+            "Creates a new GitHub repository, adds an initial README commit on GitHub, "
+            "and clones it into the chosen parent folder.",
+            "Starting from a remote README gives you a known-good first commit and an "
+            "origin remote already connected, so the local project starts in a safe state.",
+            "The app refuses to run if the destination folder already exists. Nothing is overwritten.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm("Create the repository and clone it?", True):
+            return
+        result = run_cmd(command, cwd=parent, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("GitHub repository creation/clone failed.")
+            info("If the repository was created but the clone failed, clone it with scenario B.")
+            return
+        if not target.exists():
+            warning(f"Command succeeded, but {target} was not found.")
+            return
+        self.project = target
+        success(f"Created and cloned: {target}")
+        if confirm("Run a full verification now?", True):
+            self.verify_path(target, deep=True)
+
+    def scenario_b(self) -> None:
+        heading("Scenario B - clone an existing GitHub repository")
+        gh = which_gh()
+        spec = ask("Repository (OWNER/REPO or full URL)")
+        is_url = "://" in spec or spec.startswith("git@")
+        if spec.startswith("-"):
+            failure("Repository argument must not start with '-'.")
+            return
+        if not is_url and not GH_REPO_SPEC_RE.match(spec):
+            failure("Use OWNER/REPO or a full git URL.")
+            return
+        if not is_url and not ensure_gh(require_auth=True, offer_login=True):
+            return
+        default_parent = DEFAULT_PROJECTS if DEFAULT_PROJECTS.exists() else Path.cwd()
+        parent = ask_path("Parent folder", default=default_parent)
+        if not parent.exists():
+            if not confirm(f"Create parent folder {parent}?", True):
+                return
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                failure(f"Could not create {parent}: {exc}")
+                return
+        clean = spec.rstrip("/")
+        if clean.endswith(".git"):
+            clean = clean[:-4]
+        target_name = clean.rsplit("/", 1)[-1].split(":")[-1]
+        target = parent / target_name
+        if target.exists():
+            failure(f"Destination already exists: {target}")
+            info("Refusing to clone over an existing directory. Choose another parent or use scenario D.")
+            return
+        if is_url:
+            command = ["git", "clone", spec]
+        else:
+            command = [gh or "gh", "repo", "clone", spec]
+        explain(
+            "Downloads the repository and checks out its default branch into a new local folder.",
+            "Cloning gives you the full commit history and an origin remote, so your local "
+            "copy can fetch, compare, commit, and push correctly.",
+            "The app refuses to clone over an existing directory. It will not merge into local work.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm("Clone the repository?", True):
+            return
+        result = run_cmd(command, cwd=parent, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Clone failed.")
+            info("Check the repository name, permissions, gh authentication, and SSH key/agent.")
+            return
+        if not target.exists():
+            warning(f"Clone completed, but expected directory was not found: {target}")
+            return
+        self.project = target
+        success(f"Cloned: {target}")
+        if confirm("Run a full verification now?", True):
+            self.verify_path(target, deep=True)
+
+    def scenario_c(self) -> None:
+        heading("Scenario C - publish an existing local project")
+        default = self.project or Path.cwd()
+        path = ask_path("Project directory", default=default)
+        if not path.exists():
+            failure(f"Directory does not exist: {path}")
+            return
+        if not path.is_dir():
+            failure(f"Not a directory: {path}")
+            return
+        existing_root = detect_git_root(path)
+        if existing_root is not None:
+            if existing_root == path:
+                warning("This directory is already a Git repository.")
+                info("Use scenario D to compare it with a remote, or option 8 to commit/push.")
+            else:
+                warning(f"This directory is inside an existing repository: {existing_root}")
+                info("Refusing to create a nested repository. Select the actual project folder or move it out.")
+            return
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        try:
+            is_empty = not any(path.iterdir())
+        except OSError as exc:
+            failure(f"Could not read directory: {exc}")
+            return
+        if is_empty:
+            warning("The directory is empty.")
+            info("Scenario A is usually better for a brand-new empty project because it creates a README on GitHub.")
+            if not confirm("Continue with scenario C anyway?", False):
+                return
+        explain(
+            "Runs git init -b main, which creates the hidden .git repository and makes "
+            "main the first branch.",
+            "Git cannot track, stage, commit, or push anything until the folder is a "
+            "repository. main is used consistently as the default branch.",
+            "This only creates .git; it does not modify, delete, or upload your project files.",
+        )
+        if not confirm(f"Initialize Git in {path}?", True):
+            return
+        init_result = run_cmd(["git", "init", "-b", "main"], cwd=path, timeout=30)
+        if init_result.returncode != 0:
+            fallback = run_cmd(["git", "init"], cwd=path, timeout=30)
+            if fallback.returncode == 0:
+                run_cmd(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=path, timeout=10)
+            else:
+                failure("git init failed.")
+                print(init_result.combined or fallback.combined)
+                return
+        success(f"Initialized repository: {path}")
+        self.project = path
+
+        ensure_gitignore(path)
+        ensure_readme(path)
+        if dockerfile_present(path):
+            ensure_dockerignore(path)
+        if (path / ".env").exists():
+            ensure_env_example(path)
+
+        if not identity_ready(path):
+            info("The repository was initialized but no commit was created.")
+            return
+        if not stage_changes(path):
+            info("No files were staged. Nothing was committed or published.")
+            return
+        if not review_staged_safety(path):
+            return
+        print()
+        print(col("Staged changes:", "bold"))
+        print(git_out(path, "diff", "--cached", "--stat"))
+        explain(
+            "git commit records the staged snapshot as the first commit in local history.",
+            "This is the checkpoint that will be pushed to GitHub. Creating it locally "
+            "first means a GitHub failure cannot lose your work.",
+            "Nothing is uploaded yet. If signing fails, the repository and staged files remain intact.",
+        )
+        message = ask("Initial commit message", default="Initial commit")
+        commit_result = run_cmd(["git", "commit", "-m", message], cwd=path, timeout=180)
+        if commit_result.combined:
+            print(commit_result.combined)
+        if commit_result.returncode != 0:
+            failure("Commit failed. The local repository remains intact; fix the error and use option 8.")
+            print_signing_help()
+            return
+        success("Initial commit created.")
+
+        remotes = remote_urls(path)
+        if remotes:
+            failure(f"Remote(s) already exist: {', '.join(remotes)}")
+            info("Use scenario D instead. No remote was changed.")
+            return
+        default_name = re.sub(r"[^A-Za-z0-9._-]+", "-", path.name).strip("-") or "project"
+        repo_name = ask_repo_name("GitHub repository name", default=default_name)
+        visibility = ask_visibility("private")
+        description = ask("Description (optional)", allow_empty=True)
+        command = [
+            which_gh() or "gh",
+            "repo",
+            "create",
+            repo_name,
+            f"--{visibility}",
+            "--source",
+            ".",
+            "--remote",
+            "origin",
+            "--push",
+        ]
+        if description:
+            command.extend(["--description", description])
+        explain(
+            "gh repo create creates the GitHub repository, adds it as the origin remote, "
+            "and pushes the local initial commit.",
+            "Publishing connects the verified local history to a remote backup that can be "
+            "cloned from another machine.",
+            "If creation or push fails, the local repository and commit stay safe. The app never force-pushes.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm("Create the GitHub repository and push the initial commit?", True):
+            info("Local repository and commit were kept. You can publish later with option 8 after adding a remote.")
+            return
+        result = run_cmd(command, cwd=path, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("GitHub repository creation or push failed.")
+            info("The local repository and commit are safe. No force was used. Fix the error and retry.")
+            return
+        success("Published to GitHub.")
+        if confirm("Run a full verification now?", True):
+            self.verify_path(path, deep=True)
+
+    def scenario_d(self) -> None:
+        heading("Scenario D - local and remote history diagnosis")
+        path = self.require_project()
+        if path is None:
+            return
+        remotes = remote_urls(path)
+        if "origin" not in remotes:
+            warning("No origin remote. This looks like a local-only project.")
+            info("Use scenario C to publish it, or add a remote manually.")
+            return
+        branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not branch:
+            failure("Detached HEAD. Check out a branch before diagnosing or syncing.")
+            return
+        warning("No force push will be used. A force push can destroy remote history.")
+        print("Origin: " + origin_display(path))
+        print("Local branch: " + branch)
+        explain(
+            "Runs git fetch --prune origin. Fetch downloads remote commits and branch "
+            "information, then removes local remote-tracking refs for branches that no "
+            "longer exist on origin.",
+            "You need an up-to-date picture of the remote before deciding whether local is "
+            "ahead, behind, or diverged. Fetch does not change your working files.",
+            "Fetch is read-only for your branch and files. It does not merge or push.",
+        )
+        if not confirm("Fetch origin (read-only) now?", True):
+            return
+        fetch_result = git(path, "fetch", "--prune", "origin", timeout=120, env_extra=remote_env())
+        if fetch_result.combined:
+            print(fetch_result.combined)
+        if fetch_result.returncode != 0:
+            failure("Fetch failed. Check network, SSH agent/key, and remote URL.")
+            return
+
+        remote_ref = git_out(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if not remote_ref:
+            candidate = f"origin/{branch}"
+            if git(path, "rev-parse", "--verify", "--quiet", candidate).returncode == 0:
+                remote_ref = candidate
+        if not remote_ref:
+            warning(f"Remote branch origin/{branch} does not exist yet.")
+            info("A normal 'git push -u origin " + branch + "' would create it safely; it would not force anything.")
+            if confirm("Push this branch and set upstream now?", False):
+                self.push_current(path)
+            return
+        print("Tracking reference: " + remote_ref)
+
+        backup_name = f"backup/{branch}-{time.strftime('%Y%m%d-%H%M%S')}"
+        explain(
+            f"Runs git branch {backup_name} HEAD, creating another local name for the "
+            "current commit.",
+            "A branch is a cheap safety bookmark. If a later merge or rebase is confusing, "
+            "the backup branch still points at the exact pre-sync state.",
+            "The backup branch stays local. It is not pushed and can be deleted later.",
+        )
+        if confirm(f"Create local backup branch '{backup_name}' before any sync?", True):
+            result = git(path, "branch", backup_name, "HEAD", timeout=10)
+            if result.returncode == 0:
+                success(f"Backup branch created: {backup_name}")
+            else:
+                warning("Could not create backup branch: " + one_line(result.combined))
+
+        merge_base = git(path, "merge-base", "HEAD", remote_ref, timeout=20)
+        counts_result = git(path, "rev-list", "--left-right", "--count", f"HEAD...{remote_ref}", timeout=20)
+        ahead = behind = 0
+        if counts_result.returncode == 0:
+            values = counts_result.out.split()
+            if len(values) == 2:
+                ahead, behind = int(values[0]), int(values[1])
+
+        heading("History")
+        if merge_base.returncode == 0 and merge_base.out.strip():
+            print("Common ancestor: " + merge_base.out.strip())
+        else:
+            print(col("No common ancestor found.", "red"))
+        print()
+        print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "30"))
+        print()
+        print(git_out(path, "branch", "-avv"))
+        print()
+        print(f"Local is {col(str(ahead), 'cyan')} commit(s) ahead and {col(str(behind), 'cyan')} commit(s) behind {remote_ref}.")
+
+        if merge_base.returncode != 0:
+            warning("The histories appear to be unrelated (no common base).")
+            print(
+                "Do not force. Decide which history is canonical, keep the backup branch, and merge with "
+                "'git merge --allow-unrelated-histories' only after reviewing both trees."
+            )
+            return
+        if ahead == 0 and behind == 0:
+            success("Local and remote histories are in sync.")
+            return
+        if ahead and not behind:
+            info("Local is ahead only. A normal push is safe.")
+            if confirm("Push now (normal push, no force)?", False):
+                self.push_current(path)
+            return
+        if behind and not ahead:
+            entries = status_entries(path)
+            if entries:
+                warning("Local is behind, but the working tree has changes.")
+                info("Commit or stash your work first. Then use 'git pull --ff-only'.")
+                return
+            info("Local is behind only. A fast-forward pull is safe and will not create a merge commit.")
+            explain(
+                "Runs git pull --ff-only origin <branch>. This fetches and then moves the "
+                "local branch pointer forward to the remote commit.",
+                "Because local has no unique commits, the branch can advance without a merge "
+                "commit. --ff-only makes Git refuse if that is not possible.",
+                "The working tree must be clean. The backup branch remains available.",
+            )
+            if confirm("Run 'git pull --ff-only' now?", False):
+                result = git(path, "pull", "--ff-only", "origin", branch, timeout=180, env_extra=remote_env())
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Fast-forward pull completed. Backup branch kept locally.")
+                else:
+                    failure("Fast-forward pull failed. Nothing was forced.")
+            return
+        warning("The branches have diverged (both ahead and behind).")
+        print(
+            "Recommended: keep the backup branch, inspect the log and diff, then choose merge or rebase manually. "
+            "This tool intentionally does not auto-merge, auto-rebase, or force-push diverged histories."
+        )
+        print("Useful next commands:")
+        print(f"  git log --oneline --graph --decorate --all")
+        print(f"  git diff HEAD...{remote_ref}")
+        print(f"  git switch {branch}")
+        print(f"  # then merge/rebase deliberately, run tests, and push normally")
+
+    # -- commit and push ----------------------------------------------------
+
+    def commit_and_push_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        if not git_out(path, "symbolic-ref", "--short", "-q", "HEAD"):
+            failure("Detached HEAD. Check out a branch before committing; the current commit would not belong to a branch.")
+            return
+        operations = in_progress_operations(path)
+        if operations:
+            failure("A Git operation is in progress: " + ", ".join(operations))
+            info("Finish or safely abort it before using the commit workflow.")
+            return
+        entries = status_entries(path)
+        if not entries:
+            success("Working tree is clean; nothing to commit.")
+            if confirm("Push existing commits now?", False):
+                self.push_current(path)
+            return
+        if not identity_ready(path):
+            return
+        if not stage_changes(path):
+            return
+        if not review_staged_safety(path):
+            return
+        print()
+        print(col("Staged changes:", "bold"))
+        print(git_out(path, "diff", "--cached", "--stat"))
+        explain(
+            "git commit saves the staged snapshot as a new local commit with your message.",
+            "The commit is a checkpoint you can review, sign, and push. It does not upload "
+            "anything, so a signing or message problem does not affect the remote.",
+            "Only staged content is included. The secret scan already checked that content.",
+        )
+        message = ask("Commit message (leave empty to open editor)", default="", allow_empty=True)
+        if not message and not sys.stdin.isatty():
+            failure("A commit message is required in a non-interactive session.")
+            return
+        if message:
+            result = run_cmd(["git", "commit", "-m", message], cwd=path, timeout=180)
+            if result.combined:
+                print(result.combined)
+            if result.returncode != 0:
+                failure("Commit failed. Nothing was pushed.")
+                print_signing_help()
+                return
+        else:
+            code = run_interactive(["git", "commit"], cwd=path)
+            if code != 0:
+                failure("Commit failed or was cancelled. Nothing was pushed.")
+                print_signing_help()
+                return
+        success("Commit created.")
+        if confirm("Push now (normal push, no force)?", True):
+            self.push_current(path)
+
+    def push_current(self, path: Path) -> bool:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or safely abort it before pushing.")
+            return False
+        branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not branch:
+            failure("Detached HEAD; check out a branch before pushing.")
+            return False
+        remotes = remote_urls(path)
+        if "origin" not in remotes:
+            failure("No origin remote.")
+            info("Publish the project with scenario C, or add a remote manually.")
+            return False
+        explain(
+            "git push uploads local commits to the remote branch. On the first push, -u "
+            "also records that remote branch as the upstream for this local branch.",
+            "Pushing creates the shared copy on GitHub and lets other machines clone or "
+            "fetch your work. Upstream lets later pushes and pulls use the right branch.",
+            "The app uses a normal push only. If the remote has commits you do not have, "
+            "Git rejects the push and the app directs you to scenario D instead of forcing.",
+        )
+        upstream = git_out(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream:
+            counts = git(path, "rev-list", "--left-right", "--count", f"HEAD...{upstream}", timeout=15)
+            if counts.returncode == 0:
+                values = counts.out.split()
+                if len(values) == 2:
+                    ahead, behind = int(values[0]), int(values[1])
+                    if behind:
+                        warning(f"Local is {behind} commit(s) behind {upstream}; a normal push may be rejected.")
+                        info("Use option 7 (scenario D) to diagnose, or pull --ff-only after committing/stashing local work.")
+                        if not confirm("Attempt a normal (non-force) push anyway?", False):
+                            return False
+        command = ["git", "push"]
+        if not upstream:
+            command = ["git", "push", "-u", "origin", branch]
+        print()
+        print("Command: " + col(shlex.join(command), "dim"))
+        result = run_cmd(command, cwd=path, timeout=300, env_extra=remote_env())
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Pushed branch '{branch}'.")
+            return True
+        failure("Push failed. No force was used and no history was rewritten.")
+        if re.search(r"non-fast-forward|fetch first|\[rejected\]|failed to push", result.combined, re.IGNORECASE):
+            info("The remote has commits you do not have locally. Use option 7 (scenario D) to compare histories.")
+        else:
+            info("Check SSH agent/key and gh authentication. Example: eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/<key>")
+        return False
+
+    # -- rename -------------------------------------------------------------
+
+    def rename_action(self) -> None:
+        heading("Rename project")
+        path = self.require_project()
+        if path is None:
+            return
+        old_folder = path.name
+        remotes = remote_urls(path)
+        origin_url = remotes.get("origin", "")
+        github = parse_github_url(origin_url) if origin_url else None
+        print("Current local folder: " + old_folder)
+        print("Origin: " + (origin_url or "(none)"))
+        print()
+        print(col("Git does not track the directory name itself.", "dim"))
+        print("This action can rename the local folder and/or the GitHub repository. It never rewrites history.")
+        explain(
+            "A local rename is just mv (or git worktree move for a linked worktree). A "
+            "GitHub rename is gh repo rename, followed by a check of the origin URL.",
+            "The folder name and the repository name are separate things. Changing them "
+            "keeps your history but makes the names match what you intend.",
+            "No commits are rewritten. GitHub redirects the old repository name, and the "
+            "app repairs origin if gh did not update it.",
+        )
+        new_folder = ask("New local folder name", default=old_folder)
+        if "/" in new_folder or new_folder in (".", "..") or not new_folder:
+            failure("Folder name must not contain '/' and cannot be '.' or '..'.")
+            return
+        rename_local = new_folder != old_folder and confirm(f"Rename local folder to '{new_folder}'?", True)
+        rename_github = False
+        new_github_name = ""
+        if github:
+            owner, repo = github
+            print(f"GitHub repository: {owner}/{repo}")
+            new_github_name = ask_repo_name("New GitHub repository name", default=repo)
+            rename_github = new_github_name != repo and confirm(
+                f"Rename GitHub repository {owner}/{repo} to {owner}/{new_github_name}?", False
+            )
+            if rename_github and not ensure_gh(require_auth=True, offer_login=True):
+                warning("GitHub rename skipped. Any selected local folder rename will continue.")
+                rename_github = False
+        if not rename_local and not rename_github:
+            info("Nothing to rename.")
+            return
+
+        old_path = path
+        if rename_local:
+            destination = path.parent / new_folder
+            if destination.exists():
+                failure(f"Destination already exists: {destination}")
+                return
+            linked = is_linked_worktree(path)
+            if linked:
+                command = ["git", "worktree", "move", str(path), str(destination)]
+                warning("This is a linked worktree; using 'git worktree move' so Git's metadata stays consistent.")
+            else:
+                command = ["mv", str(path), str(destination)]
+            print("Command: " + col(shlex.join(command), "dim"))
+            if not confirm("Proceed with local folder rename?", True):
+                return
+            if linked:
+                result = run_cmd(command, cwd=path, timeout=30)
+                if result.returncode != 0:
+                    failure("Local worktree move failed: " + one_line(result.combined))
+                    return
+            else:
+                try:
+                    os.rename(path, destination)
+                except OSError as exc:
+                    failure(f"Local rename failed: {exc}")
+                    return
+            self.project = destination
+            path = destination
+            success(f"Local folder renamed to {destination}")
+            print(col(f"Your shell is still in the old path if you launched from it. Run: cd {shlex.quote(str(destination))}", "dim"))
+
+        if rename_github and github:
+            owner, repo = github
+            gh = which_gh() or "gh"
+            command = [gh, "repo", "rename", new_github_name, "--yes"]
+            explain(
+                "Runs gh repo rename to rename the repository on GitHub. The app then "
+                "checks that origin points at the new name and repairs it if necessary.",
+                "GitHub repository names are part of clone URLs and web links. Renaming "
+                "keeps them consistent with the new project name.",
+                "The commit history is unchanged. GitHub redirects the old name for now, "
+                "but other clones and external links still need updating.",
+            )
+            print("Command: " + col(shlex.join(command), "dim"))
+            if not confirm("Rename the GitHub repository now? Old URLs will redirect.", True):
+                return
+            result = run_cmd(command, cwd=path, timeout=60)
+            if result.combined:
+                print(result.combined)
+            if result.returncode != 0:
+                failure("GitHub repository rename failed. The local folder rename (if any) was kept.")
+                return
+            success(f"GitHub repository renamed to {owner}/{new_github_name}.")
+            current_url = git_out(path, "remote", "get-url", "origin")
+            expected_url = ""
+            if current_url.startswith("git@github.com:"):
+                expected_url = f"git@github.com:{owner}/{new_github_name}.git"
+            elif current_url.startswith("ssh://git@github.com/"):
+                expected_url = f"ssh://git@github.com/{owner}/{new_github_name}.git"
+            elif current_url.startswith("https://github.com/"):
+                expected_url = f"https://github.com/{owner}/{new_github_name}.git"
+            if expected_url and current_url != expected_url:
+                fix = git(path, "remote", "set-url", "origin", expected_url, timeout=10)
+                if fix.returncode == 0:
+                    success(f"Updated origin to {expected_url}")
+                else:
+                    warning("Could not update origin automatically: " + one_line(fix.combined))
+            info("The old GitHub name redirects for now, but update any external links and local clones.")
+        entries = status_entries(path)
+        if entries and confirm("Working tree has changes. Commit and push them now?", False):
+            self.commit_and_push_action()
+
+    # -- global settings ----------------------------------------------------
+
+    def settings_action(self) -> None:
+        explain(
+            "Reads your personal Git configuration with git config --global. Any change "
+            "is written only after this wizard shows a plan and you confirm it.",
+            "Global settings apply to every repository on this machine. Repository-local "
+            "settings can override them, so the app verifies both where relevant.",
+            "Nothing is changed just by opening this menu. Raw values are shown for review.",
+        )
+        while True:
+            config = read_global_config()
+            heading("Global Git and GitHub settings")
+            keys = [
+                "user.name",
+                "user.email",
+                "init.defaultbranch",
+                "pull.ff",
+                "push.default",
+                "fetch.prune",
+                "core.editor",
+                "gpg.format",
+                "user.signingkey",
+                "commit.gpgsign",
+                "gpg.ssh.allowedSignersFile",
+            ]
+            for key in keys:
+                value = cfg_get(config, key)
+                print(f"  {key:32} {value or '(not set)'}")
+            print(f"  {'GitHub HTTPS rewrite':32} {'configured' if signing_url_rewrite(config) else '(not set)'}")
+            print()
+            print("  1) Show the full global check")
+            print("  2) Apply missing/recommended settings (guided)")
+            print("  3) Change Git identity")
+            print("  4) Configure SSH commit signing key")
+            print("  5) Configure allowed_signers for local verification")
+            print("  6) Add signing key to GitHub")
+            print("  7) GitHub authentication (login / refresh scope)")
+            print("  8) Show raw global config")
+            print("  9) Explain what every setting means and why")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                print_report(build_global_report(config, deep=True))
+            elif choice == "2":
+                self.apply_recommended_settings()
+            elif choice == "3":
+                self.change_identity(config)
+            elif choice == "4":
+                self.configure_signing_key(config)
+            elif choice == "5":
+                self.configure_allowed_signers_action(config)
+            elif choice == "6":
+                self.add_signing_key_to_github(config)
+            elif choice == "7":
+                self.github_auth_action()
+            elif choice == "8":
+                result = run_cmd(["git", "config", "--global", "--list"], timeout=10)
+                print(result.combined)
+            elif choice == "9":
+                self.show_setting_help()
+            else:
+                warning("Unknown option.")
+
+    def show_setting_help(self) -> None:
+        heading("What each setting means")
+        keys = [
+            "user.name",
+            "user.email",
+            "init.defaultbranch",
+            "pull.ff",
+            "push.default",
+            "fetch.prune",
+            "core.editor",
+            "gpg.format",
+            "user.signingkey",
+            "commit.gpgsign",
+            "tag.gpgsign",
+            "gpg.ssh.allowedsignersfile",
+            "url.git@github.com:.insteadof",
+        ]
+        for key in keys:
+            what, why = SETTING_HELP.get(key, ("", ""))
+            print()
+            print(col(key, "bold"))
+            print(wrap("  What: " + what, indent="  "))
+            print(wrap("  Why:  " + why, indent="  "))
+        print()
+
+    def change_identity(self, config: Dict[str, List[str]]) -> None:
+        current_name = cfg_get(config, "user.name")
+        current_email = cfg_get(config, "user.email")
+        name = ask("Git user.name", default=current_name or None)
+        email = ask_email("Git user.email", default=current_email or None)
+        if not confirm(f'Set global identity to "{name} <{email}>"?', True):
+            return
+        set_global_config("user.name", name)
+        set_global_config("user.email", email)
+
+    def choose_signing_key(self, config: Dict[str, List[str]]) -> Optional[str]:
+        current = cfg_get(config, "user.signingkey")
+        ssh_dir = HOME / ".ssh"
+        candidates = sorted(ssh_dir.glob("*.pub")) if ssh_dir.exists() else []
+        if current:
+            current_path = find_existing_path(current)
+            if current_path and current_path not in candidates:
+                candidates.insert(0, current_path)
+        if not candidates:
+            warning("No SSH public keys found in ~/.ssh.")
+            print(
+                textwrap.dedent(
+                    """\
+                    Create one with:
+                      ssh-keygen -t ed25519 -C "your@email"
+                      eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
+                      gh ssh-key add ~/.ssh/id_ed25519.pub --type signing
+                    """
+                )
+            )
+            return None
+        print()
+        for index, path in enumerate(candidates, 1):
+            fingerprint = key_fingerprint(path)
+            print(f"  {index}) {path}" + (f"  {fingerprint}" if fingerprint else ""))
+        default_index = "1"
+        if current:
+            current_path = find_existing_path(current)
+            if current_path in candidates:
+                default_index = str(candidates.index(current_path) + 1)
+        choice = ask("Choose a public key number or enter a path", default=default_index)
+        try:
+            index = int(choice)
+            if 1 <= index <= len(candidates):
+                return str(candidates[index - 1])
+        except ValueError:
+            pass
+        path = Path(os.path.expanduser(choice))
+        _, text, error = resolve_public_key(str(path))
+        if error or text is None:
+            failure(error or "invalid public key")
+            return None
+        return str(path)
+
+    def configure_signing_key(self, config: Dict[str, List[str]]) -> Optional[str]:
+        key = self.choose_signing_key(config)
+        if not key:
+            return None
+        print()
+        explain(
+            "Sets gpg.format=ssh, user.signingkey to the selected public key, and "
+            "commit.gpgsign=true in your global Git config.",
+            "Git can then reuse your existing SSH key to sign every new commit instead "
+            "of setting up a separate GPG key.",
+            "Only the public key path is stored in Git config. The private key stays in "
+            "~/.ssh or ssh-agent and is never uploaded by this app.",
+        )
+        if not confirm(f"Configure SSH commit signing with {key}?", True):
+            return None
+        set_global_config("gpg.format", "ssh")
+        set_global_config("user.signingkey", key)
+        set_global_config("commit.gpgsign", "true")
+        if confirm("Also configure allowed_signers for local signature verification?", True):
+            email = cfg_get(config, "user.email")
+            if not email or not EMAIL_RE.match(email):
+                email = ask_email("Email principal for allowed_signers")
+            self.ensure_allowed_signers(key, email, confirm_write=True)
+        return key
+
+    def configure_allowed_signers_action(self, config: Dict[str, List[str]]) -> None:
+        key_value = cfg_get(config, "user.signingkey")
+        if not key_value:
+            key_value = self.choose_signing_key(config) or ""
+        if not key_value:
+            return
+        email = cfg_get(config, "user.email")
+        if not email or not EMAIL_RE.match(email):
+            email = ask_email("Email principal for allowed_signers")
+        self.ensure_allowed_signers(key_value, email, confirm_write=True)
+
+    def ensure_allowed_signers(self, key_value: str, email: str, confirm_write: bool = True) -> Optional[Path]:
+        key_path, key_text, error = resolve_public_key(key_value)
+        if error or not key_text:
+            failure("Cannot use signing key for allowed_signers: " + (error or "empty key"))
+            return None
+        config = read_global_config()
+        configured = cfg_get(config, "gpg.ssh.allowedSignersFile")
+        if configured:
+            path = find_existing_path(configured)
+            if path is None:
+                path = Path(os.path.expanduser(configured))
+                if not path.is_absolute():
+                    path = HOME / path
+        else:
+            path = HOME / ".config" / "git" / "allowed_signers"
+        wanted = key_data(key_text)
+        existing = read_text(path) if path.exists() else ""
+        if any(
+            allowed_signers_key_data(line) == wanted
+            for line in existing.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ):
+            if not configured:
+                set_global_config("gpg.ssh.allowedSignersFile", str(path))
+            success(f"allowed_signers already contains this key: {path}")
+            return path
+        line = f"{email} {wanted}"
+        explain(
+            "Adds one line to an allowed-signers file: an email principal followed by "
+            f"the public key ({wanted.split()[0]}).",
+            "Git uses this file to decide whether an SSH signature is trusted. It is "
+            "the local equivalent of GitHub showing a Verified badge.",
+            "Only public key material and the email principal are written. The private "
+            "key remains in ~/.ssh or ssh-agent.",
+        )
+        print(f"File: {path}")
+        print(f"Line: {line}")
+        if confirm_write and not confirm("Append this key and configure gpg.ssh.allowedSignersFile?", True):
+            return None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            prefix = ""
+            if path.exists():
+                current = path.read_text(encoding="utf-8", errors="replace")
+                if current and not current.endswith("\n"):
+                    prefix = "\n"
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(prefix + line + "\n")
+        except OSError as exc:
+            failure(f"Could not update {path}: {exc}")
+            return None
+        success(f"updated {path}")
+        set_global_config("gpg.ssh.allowedSignersFile", str(path))
+        return path
+
+    def add_signing_key_to_github(self, config: Dict[str, List[str]]) -> None:
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        key_value = cfg_get(config, "user.signingkey")
+        if not key_value:
+            key_value = self.choose_signing_key(config) or ""
+        if not key_value:
+            return
+        key_path, key_text, error = resolve_public_key(key_value)
+        if error or key_path is None:
+            failure("gh ssh-key add needs a public-key file: " + (error or "inline key cannot be uploaded"))
+            return
+        keys, api_error = fetch_github_signing_keys()
+        if not api_error:
+            wanted = key_data(key_text or "")
+            if any(key_data(str(item.get("key", ""))) == wanted for item in keys or []):
+                success("This signing key is already registered on GitHub.")
+                return
+        elif api_error:
+            info("Could not read existing signing keys: " + api_error)
+        explain(
+            "Uploads the selected public key to GitHub as a signing key, using the "
+            "admin:ssh_signing_key OAuth scope.",
+            "GitHub can then mark commits signed with the matching private key as "
+            "Verified. The private key never leaves this machine.",
+            "Only the public key is uploaded. If the token lacks the scope, the app "
+            "offers the gh auth refresh command.",
+        )
+        print("Commands:")
+        print(f"  gh auth refresh -h github.com -s admin:ssh_signing_key")
+        print(f"  gh ssh-key add {key_path} --type signing")
+        if not confirm("Add this key to GitHub now?", True):
+            return
+        gh = which_gh() or "gh"
+        result = run_cmd([gh, "ssh-key", "add", str(key_path), "--type", "signing", "--title", "git-create signing key"], timeout=60)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success("Signing key added to GitHub.")
+            return
+        warning("Adding the key failed. This commonly means the gh token lacks the admin:ssh_signing_key scope.")
+        if sys.stdin.isatty() and confirm("Run 'gh auth refresh -h github.com -s admin:ssh_signing_key' now?", True):
+            code = run_interactive([gh, "auth", "refresh", "-h", "github.com", "-s", "admin:ssh_signing_key"])
+            if code == 0:
+                retry = run_cmd(
+                    [gh, "ssh-key", "add", str(key_path), "--type", "signing", "--title", "git-create signing key"],
+                    timeout=60,
+                )
+                if retry.combined:
+                    print(retry.combined)
+                if retry.returncode == 0:
+                    success("Signing key added to GitHub.")
+                else:
+                    failure("Retry failed. Check gh auth status.")
+
+    def github_auth_action(self) -> None:
+        gh = which_gh()
+        if not gh:
+            failure("gh is not installed.")
+            return
+        explain(
+            "gh auth login authenticates the GitHub CLI, and gh auth refresh adds "
+            "requested OAuth scopes to the existing login.",
+            "GitHub operations such as repo create, clone, rename, and signing-key "
+            "management need an authenticated gh session with the right permissions.",
+            "These commands are interactive and run in your terminal. The app does not "
+            "store or print your token.",
+        )
+        while True:
+            ok, account, text = gh_auth_status()
+            heading("GitHub authentication")
+            if ok:
+                success(f"Authenticated for github.com{f' as {account}' if account else ''}.")
+            else:
+                warning("Not authenticated for github.com.")
+                if text:
+                    print(col(text, "dim"))
+            print("  1) gh auth login")
+            print("  2) Refresh with admin:ssh_signing_key scope")
+            print("  3) Show gh auth status")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                if not sys.stdin.isatty():
+                    info("Run in a terminal: gh auth login --hostname github.com --git-protocol ssh")
+                    continue
+                run_interactive([gh, "auth", "login", "--hostname", "github.com", "--web", "--git-protocol", "ssh"])
+            elif choice == "2":
+                if not sys.stdin.isatty():
+                    info("Run in a terminal: gh auth refresh -h github.com -s admin:ssh_signing_key")
+                    continue
+                run_interactive([gh, "auth", "refresh", "-h", "github.com", "-s", "admin:ssh_signing_key"])
+            elif choice == "3":
+                print(run_cmd([gh, "auth", "status", "--hostname", "github.com"], timeout=12).combined)
+
+    def apply_recommended_settings(self) -> None:
+        config = read_global_config()
+        changes: List[Tuple[str, str, bool]] = []
+        name = cfg_get(config, "user.name")
+        email = cfg_get(config, "user.email")
+        if not name.strip():
+            name = ask("Git user.name")
+            changes.append(("user.name", name, False))
+        if not email.strip() or not EMAIL_RE.match(email.strip()):
+            email = ask_email("Git user.email", default=email or None)
+            changes.append(("user.email", email, False))
+
+        if cfg_get(config, "init.defaultbranch").lower() != "main":
+            changes.append(("init.defaultBranch", "main", False))
+        if cfg_get(config, "pull.ff").lower() != "only":
+            changes.append(("pull.ff", "only", False))
+        if cfg_get(config, "push.default").lower() != "simple":
+            changes.append(("push.default", "simple", False))
+        if cfg_get(config, "fetch.prune").lower() != "true":
+            changes.append(("fetch.prune", "true", False))
+        if not cfg_get(config, "core.editor"):
+            changes.append(("core.editor", os.environ.get("EDITOR") or "nano", False))
+
+        key_value = cfg_get(config, "user.signingkey")
+        _, key_text, key_error = resolve_public_key(key_value) if key_value else (None, None, "not set")
+        if not key_text or key_error:
+            key_value = self.choose_signing_key(config) or ""
+            if key_value:
+                _, key_text, key_error = resolve_public_key(key_value)
+                changes.append(("gpg.format", "ssh", False))
+                changes.append(("user.signingkey", key_value, False))
+                changes.append(("commit.gpgsign", "true", False))
+        else:
+            if cfg_get(config, "gpg.format").lower() != "ssh":
+                changes.append(("gpg.format", "ssh", False))
+            if cfg_get(config, "commit.gpgsign").lower() != "true":
+                changes.append(("commit.gpgsign", "true", False))
+
+        if not signing_url_rewrite(config):
+            changes.append(("url.git@github.com:.insteadOf", "https://github.com/", True))
+
+        allowed_value = cfg_get(config, "gpg.ssh.allowedSignersFile")
+        allowed_path = find_existing_path(allowed_value) if allowed_value else None
+        configure_allowed = False
+        if key_text and email:
+            if not allowed_path or not allowed_path.is_file():
+                configure_allowed = True
+            else:
+                wanted = key_data(key_text)
+                configure_allowed = not any(
+                    allowed_signers_key_data(line) == wanted
+                    for line in read_text(allowed_path).splitlines()
+                    if line.strip() and not line.strip().startswith("#")
+                )
+
+        if not changes and not configure_allowed:
+            success("Recommended settings are already in place.")
+            return
+        print()
+        print(col("Planned changes:", "bold"))
+        for key, value, add in changes:
+            print(f"  + {key} = {value}" + (" (add)" if add else ""))
+            _, why = SETTING_HELP.get(key.lower(), ("", ""))
+            if why:
+                print(wrap("    Why: " + why, indent="      "))
+        if configure_allowed:
+            print("  + create/update allowed_signers and set gpg.ssh.allowedSignersFile")
+            print(wrap("    Why: " + SETTING_HELP["gpg.ssh.allowedsignersfile"][1], indent="      "))
+        print()
+        if not confirm("Apply these changes to the global Git config?", True):
+            return
+        for key, value, add in changes:
+            set_global_config(key, value, add=add)
+        if configure_allowed and key_text:
+            self.ensure_allowed_signers(key_value, email, confirm_write=False)
+        print()
+        print_report(build_global_report(read_global_config(), deep=False), only_problems=True)
+
+    # -- project files ------------------------------------------------------
+
+    def files_action(self) -> None:
+        explain(
+            "Creates missing project hygiene files from safe templates. Existing files "
+            "are never overwritten; an existing .gitignore only receives missing secret rules.",
+            "These files prevent secrets and generated output from entering Git or Docker, "
+            "and make the project understandable to other people.",
+            "Every write is confirmed first. Review the resulting git status before committing.",
+        )
+        print()
+        print(col("Why these files matter:", "bold"))
+        for name, why in FILE_HELP.items():
+            print(wrap(f"  {name:15} {why}", indent="  "))
+        while True:
+            path = self.require_project()
+            if path is None:
+                return
+            heading("Important project files")
+            print_file_checklist(path)
+            print()
+            print("  1) Repair/create .gitignore")
+            print("  2) Create .dockerignore")
+            print("  3) Create README.md")
+            print("  4) Create .editorconfig")
+            print("  5) Generate .env.example from .env (blank values only)")
+            print("  6) Create all safe missing files")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            changed = False
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                changed = ensure_gitignore(path)
+            elif choice == "2":
+                changed = ensure_dockerignore(path)
+            elif choice == "3":
+                changed = ensure_readme(path)
+            elif choice == "4":
+                changed = ensure_editorconfig(path)
+            elif choice == "5":
+                changed = ensure_env_example(path)
+            elif choice == "6":
+                changed = ensure_gitignore(path) or changed
+                changed = ensure_readme(path) or changed
+                if dockerfile_present(path):
+                    changed = ensure_dockerignore(path) or changed
+                changed = ensure_editorconfig(path) or changed
+                if (path / ".env").exists():
+                    changed = ensure_env_example(path) or changed
+            else:
+                warning("Unknown option.")
+            if changed:
+                status = git_out(path, "status", "--short")
+                if status:
+                    print()
+                    print(status)
+                if confirm("Commit these file changes now?", False):
+                    self.commit_and_push_action()
+
+    # -- safety helpers -----------------------------------------------------
+
+    def print_signing_help(self) -> None:
+        print_signing_help()
+
+
+def print_signing_help() -> None:
+    print()
+    print(col("SSH signing troubleshooting:", "bold"))
+    print("  git config --global gpg.format ssh")
+    print("  git config --global user.signingkey ~/.ssh/<your-key>.pub")
+    print("  git config --global commit.gpgsign true")
+    print("  git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers")
+    print("  gh auth refresh -h github.com -s admin:ssh_signing_key")
+    print("  gh ssh-key add ~/.ssh/<your-key>.pub --type signing")
+    print("  eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/<your-key>")
+
+
+def origin_display(path: Path) -> str:
+    return remote_urls(path).get("origin", "(none)")
+
+
+# ---------------------------------------------------------------------------
+# Staging and staged safety
+# ---------------------------------------------------------------------------
+
+
+def stage_changes(root: Path) -> bool:
+    entries = status_entries(root)
+    if not entries:
+        info("No changes to stage.")
+        return False
+    explain(
+        "git add copies the selected working-tree changes into the staging area (also "
+        "called the index). The next commit will record exactly that staged snapshot.",
+        "Staging is the review step between editing files and saving a commit. It lets "
+        "you exclude unfinished work, generated files, or anything suspicious.",
+        "Ignored files such as .env are not staged. The app shows the list before adding "
+        "anything and scans the staged content before committing.",
+    )
+    heading("Changes")
+    for index, entry in enumerate(entries, 1):
+        print(f"  {index:>3}) {entry.display}")
+    print()
+    mode = ask("Stage [a]ll, [s]elect, or [c]ancel", default="a").lower()
+    if mode in ("c", "cancel", "n", "no"):
+        info("Cancelled; nothing was staged.")
+        return False
+    if mode in ("a", "all", ""):
+        command = ["git", "add", "-A"]
+    elif mode in ("s", "select"):
+        selection = ask("Path numbers (examples: 1,3,5-7)")
+        chosen: List[StatusEntry] = []
+        for part in selection.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            if "-" in part:
+                start_text, end_text = part.split("-", 1)
+                try:
+                    start, end = int(start_text), int(end_text)
+                except ValueError:
+                    warning(f"Invalid range: {part}")
+                    return False
+                chosen.extend(entries[index - 1] for index in range(start, end + 1) if 1 <= index <= len(entries))
+            else:
+                try:
+                    index = int(part)
+                except ValueError:
+                    warning(f"Invalid number: {part}")
+                    return False
+                if 1 <= index <= len(entries):
+                    chosen.append(entries[index - 1])
+        if not chosen:
+            warning("Nothing selected.")
+            return False
+        paths: List[str] = []
+        for entry in chosen:
+            paths.extend(entry.stage_paths)
+        command = ["git", "add", "-A", "--", *paths]
+    else:
+        warning("Unknown choice.")
+        return False
+    print()
+    print("Command: " + col(shlex.join(command), "dim"))
+    if not confirm("Stage these changes?", True):
+        return False
+    result = run_cmd(command, cwd=root, timeout=60)
+    if result.combined:
+        print(result.combined)
+    if result.returncode != 0:
+        failure("Staging failed.")
+        return False
+    staged = git_out(root, "diff", "--cached", "--name-only")
+    if not staged:
+        warning("No staged files.")
+        return False
+    success(f"Staged {len(staged.splitlines())} path(s).")
+    return True
+
+
+def staged_paths(root: Path, added_only: bool = True) -> List[str]:
+    args = ["diff", "--cached", "--name-only", "-z"]
+    if added_only:
+        args.append("--diff-filter=ACMRT")
+    result = git(root, *args, timeout=20)
+    if result.returncode != 0:
+        return []
+    return [item for item in result.out.split("\0") if item]
+
+
+def worktree_mismatch(root: Path, paths: Sequence[str]) -> List[str]:
+    """Paths whose index content differs from the working tree."""
+    if not paths:
+        return []
+    result = git(root, "diff", "--name-only", "-z", "--", *paths, timeout=20)
+    if result.returncode != 0:
+        return []
+    return [item for item in result.out.split("\0") if item]
+
+
+def unstage_paths(root: Path, paths: Sequence[str]) -> bool:
+    """Remove paths from the index without touching working-tree files."""
+    if not paths:
+        return True
+    has_head = git(root, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
+    if has_head:
+        command = ["git", "restore", "--staged", "--", *paths]
+    else:
+        command = ["git", "rm", "--cached", "-r", "-q", "--", *paths]
+    result = run_cmd(command, cwd=root, timeout=60)
+    if result.returncode != 0:
+        warning("Could not unstage automatically: " + one_line(result.combined))
+        print("Unstage manually with: git restore --staged -- " + " ".join(shlex.quote(path) for path in paths))
+        return False
+    return True
+
+
+def review_staged_safety(root: Path) -> bool:
+    paths = staged_paths(root, added_only=True)
+    if not paths:
+        warning("No added/modified files are staged.")
+        return False
+    mismatch = worktree_mismatch(root, paths)
+    if mismatch:
+        failure("The index differs from the working tree for:")
+        for path in mismatch[:12]:
+            print("  - " + path)
+        print("Stage the current content again before committing, or unstage the paths.")
+        info("This prevents a secret scan of the working tree from approving different staged content.")
+        return False
+    sensitive = [path for path in paths if is_sensitive_name(path)]
+    findings, truncated = scan_secret_content(root, paths)
+    problems = []
+    near_limit: List[Tuple[str, int]] = []
+    large_warning: List[Tuple[str, int]] = []
+    for path in paths:
+        absolute = root / path
+        try:
+            if absolute.is_symlink() or not absolute.is_file():
+                continue
+            size = absolute.stat().st_size
+        except OSError:
+            continue
+        if size >= 95 * 1024 * 1024:
+            near_limit.append((path, size))
+        elif size >= 50 * 1024 * 1024:
+            large_warning.append((path, size))
+    if sensitive:
+        problems.append("Sensitive filenames: " + ", ".join(sensitive[:8]))
+    if near_limit:
+        problems.append(
+            "Files at/near GitHub's 100 MiB limit: "
+            + ", ".join(f"{path} ({format_size(size)})" for path, size in near_limit[:5])
+        )
+    if large_warning:
+        warning(
+            "Large staged files (GitHub warns above 50 MiB): "
+            + ", ".join(f"{path} ({format_size(size)})" for path, size in large_warning[:5])
+        )
+    if findings:
+        problems.append(
+            "Possible secrets: "
+            + ", ".join(f"{path}:{line} ({kind})" for path, line, kind, _ in findings[:8])
+            + (" ..." if len(findings) > 8 else "")
+        )
+    if truncated:
+        problems.append("Secret scan limit reached; review large/binary files manually.")
+    if not problems:
+        success("Staged files passed the sensitive-name and common-secret scan.")
+        return True
+    failure("Staged content needs review before committing:")
+    for problem in problems:
+        print("  - " + problem)
+    print()
+    print("If any value is real: remove it from the index, rotate the credential, and use .env or a secret manager.")
+    print("If these are safe test fixtures and you truly intend to commit them, type COMMIT below.")
+    warning("This can permanently publish secrets.")
+    try:
+        answer = ask('Type "COMMIT" to continue, or press Enter to cancel', allow_empty=True)
+    except EOFError:
+        answer = ""
+    if answer == "COMMIT":
+        return True
+    risky_paths = sorted(set(sensitive + [path for path, _, _, _ in findings] + [path for path, _ in near_limit]))
+    if risky_paths and unstage_paths(root, risky_paths):
+        info("Risky paths were unstaged; working-tree files were not changed.")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Repository scanning
+# ---------------------------------------------------------------------------
+
+
+def scan_repositories(root: Path, max_depth: int = DEFAULT_DEPTH) -> List[Dict[str, object]]:
+    root = root.resolve()
+    results: List[Dict[str, object]] = []
+    skip_dirs = {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        "dist",
+        "build",
+        "target",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".cache",
+        "vendor",
+    }
+    for dirpath, dirnames, filenames in os.walk(root):
+        current = Path(dirpath)
+        try:
+            relative = current.relative_to(root)
+            depth = 0 if str(relative) == "." else len(relative.parts)
+        except ValueError:
+            depth = 0
+        if depth >= max_depth:
+            dirnames[:] = []
+        if ".git" in dirnames or ".git" in filenames:
+            info = quick_repo_info(current)
+            if info is not None:
+                results.append(info)
+        dirnames[:] = sorted(name for name in dirnames if name not in skip_dirs)
+    results.sort(key=lambda item: str(item["path"]).lower())
+    return results
+
+
+def quick_repo_info(path: Path) -> Optional[Dict[str, object]]:
+    root = detect_git_root(path)
+    if root is None or root != path.resolve():
+        return None
+    branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "detached"
+    entries = status_entries(path)
+    counts = status_counts(entries)
+    ahead = behind = 0
+    upstream = git_out(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if upstream:
+        result = git(path, "rev-list", "--left-right", "--count", f"HEAD...{upstream}", timeout=10)
+        if result.returncode == 0:
+            values = result.out.split()
+            if len(values) == 2:
+                ahead, behind = int(values[0]), int(values[1])
+    last = git_out(path, "log", "-1", "--format=%h %s")
+    remotes = remote_urls(path)
+    return {
+        "path": str(root),
+        "name": root.name,
+        "branch": branch,
+        "dirty": bool(entries),
+        "changed": len(entries),
+        "staged": counts["staged"],
+        "unstaged": counts["unstaged"],
+        "untracked": counts["untracked"],
+        "ahead": ahead,
+        "behind": behind,
+        "upstream": upstream,
+        "origin": remotes.get("origin", ""),
+        "last_commit": last,
+    }
+
+
+def print_scan_results(root: Path, repos: Sequence[Dict[str, object]], depth: int) -> None:
+    heading(f"Repositories under {root}")
+    if not repos:
+        info("No Git repositories found. Increase depth or choose another folder.")
+        return
+    print(f"Found {len(repos)} repository/repositories (depth {depth}).")
+    print(
+        col(
+            "Legend: branch = current branch; clean/dirty = uncommitted changes; "
+            "ahead/behind = local commits vs the tracked remote branch; origin = remote URL.",
+            "dim",
+        )
+    )
+    for index, repo in enumerate(repos, 1):
+        state = "dirty" if repo["dirty"] else "clean"
+        print()
+        print(f"  [{index:>2}] {col(str(repo['name']), 'bold')}  ({repo['branch']}, {state})")
+        print(f"       {repo['path']}")
+        print(
+            f"       changed={repo['changed']} untracked={repo['untracked']} "
+            f"ahead={repo['ahead']} behind={repo['behind']}"
+        )
+        if repo["origin"]:
+            print(f"       origin={one_line(str(repo['origin']), 100)}")
+        if repo["last_commit"]:
+            print(f"       last={one_line(str(repo['last_commit']), 100)}")
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def cli_check(args: argparse.Namespace) -> int:
+    path = ask_path_from_arg(args.path)
+    root = detect_git_root(path)
+    if root is None:
+        message = f"Not a Git repository: {path}"
+        if args.json:
+            print(json.dumps({"error": message}, indent=2))
+        else:
+            failure(message)
+        return 2
+    config = read_global_config()
+    report = combined_report(root, deep=not args.offline, scan_content=True, config=config)
+    report.meta.update(
+        {
+            "command": "check",
+            "path": str(root),
+            "offline": bool(args.offline),
+            "strict": bool(args.strict),
+        }
+    )
+    if args.json:
+        print(json.dumps(report.as_dict(), indent=2, ensure_ascii=False))
+    else:
+        print_report(report)
+    if report.has_failures():
+        return 1
+    if args.strict and any(check.level == "WARN" for check in report.checks()):
+        return 1
+    return 0
+
+
+def cli_scan(args: argparse.Namespace) -> int:
+    root = ask_path_from_arg(args.path)
+    if not root.exists() or not root.is_dir():
+        failure(f"Not a directory: {root}")
+        return 2
+    depth = max(1, min(int(args.depth), 10))
+    repos = scan_repositories(root, depth)
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "app": APP,
+                    "version": VERSION,
+                    "root": str(root),
+                    "depth": depth,
+                    "repositories": repos,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+    else:
+        print_scan_results(root, repos, depth)
+    return 0
+
+
+def ask_path_from_arg(value: str) -> Path:
+    path = Path(os.path.expanduser(os.path.expandvars(value)))
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog=APP,
+        description="Safe menu-driven Git/GitHub project assistant. Run without arguments for the menu.",
+        epilog="Examples: git-create check --offline; git-create scan ~/Projects --depth 3",
+    )
+    parser.add_argument("--version", action="version", version=f"{APP} {VERSION}")
+    parser.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    parser.add_argument("--debug", action="store_true", help="show Python tracebacks on unexpected errors")
+    subparsers = parser.add_subparsers(dest="command")
+
+    check_parser = subparsers.add_parser("check", help="verify a repository non-interactively")
+    check_parser.add_argument("path", nargs="?", default=".", help="repository path (default: current directory)")
+    check_parser.add_argument("--offline", action="store_true", help="skip network checks")
+    check_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    check_parser.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
+    check_parser.set_defaults(func=cli_check)
+
+    scan_parser = subparsers.add_parser("scan", help="find Git repositories under a folder")
+    scan_parser.add_argument("path", nargs="?", default=".", help="folder to scan (default: current directory)")
+    scan_parser.add_argument("--depth", type=int, default=DEFAULT_DEPTH, help="maximum depth (default: 3)")
+    scan_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    scan_parser.set_defaults(func=cli_scan)
+
+    for subparser in (check_parser, scan_parser):
+        subparser.add_argument(
+            "--no-color",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="disable ANSI colors (also accepted before the subcommand)",
+        )
+        subparser.add_argument(
+            "--debug",
+            action="store_true",
+            default=argparse.SUPPRESS,
+            help="show Python tracebacks on unexpected errors",
+        )
+    return parser
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    global COLOR_ENABLED
+    if getattr(args, "no_color", False):
+        COLOR_ENABLED = False
+    try:
+        if getattr(args, "func", None):
+            return int(args.func(args))
+        return App().run()
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return 130
+    except BrokenPipeError:
+        return 0
+    except Exception as exc:  # noqa: BLE001 - top-level safety net
+        failure(f"Unexpected error: {exc}")
+        if getattr(args, "debug", False):
+            import traceback
+
+            traceback.print_exc()
+        else:
+            info("Run with --debug for a traceback.")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
