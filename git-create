@@ -1889,14 +1889,28 @@ def build_project_report(
                     )
                 )
             else:
-                repository.checks.append(
-                    Check(
-                        "INFO",
-                        "HEAD signature",
-                        "HEAD is not signed",
-                        "New commits are signed when commit.gpgsign=true and the SSH key is configured.",
-                    )
+                raw_commit = git(root, "cat-file", "commit", "HEAD", timeout=10)
+                signed_but_unknown = raw_commit.returncode == 0 and bool(
+                    re.search(r"(?m)^gpgsig(?:-sha256)? ", raw_commit.out)
                 )
+                if signed_but_unknown:
+                    repository.checks.append(
+                        Check(
+                            "WARN",
+                            "HEAD signature",
+                            "HEAD is signed, but Git cannot verify the signer locally",
+                            "Configure gpg.ssh.allowedSignersFile with the signing key so verification can succeed.",
+                        )
+                    )
+                else:
+                    repository.checks.append(
+                        Check(
+                            "INFO",
+                            "HEAD signature",
+                            "HEAD is not signed",
+                            "New commits are signed when commit.gpgsign=true and the SSH key is configured.",
+                        )
+                    )
 
     settings = report.section("Project settings")
     effective_name = git_out(root, "config", "--get", "user.name")
