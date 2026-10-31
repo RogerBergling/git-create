@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 APP = "git-create"
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -249,7 +249,7 @@ name: Build and publish GHCR image
 
 "on":
   push:
-    branches: [main]
+    branches: [__BRANCH__]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -1391,6 +1391,37 @@ def is_linked_worktree(root: Path) -> bool:
         return False
 
 
+def git_operation_kind(root: Path) -> Optional[str]:
+    if git_path(root, "MERGE_HEAD").exists():
+        return "merge"
+    if git_path(root, "rebase-merge").exists() or git_path(root, "rebase-apply").exists():
+        return "rebase"
+    return None
+
+
+def shared_commit_in_range(root: Path, target: str, max_commits: int = 200) -> Tuple[Optional[str], int]:
+    result = git(root, "rev-list", f"{target}..HEAD", timeout=30)
+    if result.returncode != 0:
+        return None, 0
+    commits = [line.strip() for line in result.out.splitlines() if line.strip()]
+    if len(commits) > max_commits:
+        return "LIMIT", len(commits)
+    for commit in commits:
+        refs = git(
+            root,
+            "for-each-ref",
+            "--contains",
+            commit,
+            "--format=%(refname)",
+            "refs/remotes",
+            "refs/tags",
+            timeout=15,
+        )
+        if refs.returncode == 0 and refs.out.strip():
+            return commit, len(commits)
+    return None, len(commits)
+
+
 def in_progress_operations(root: Path) -> List[str]:
     markers = [
         ("MERGE_HEAD", "merge in progress"),
@@ -1532,6 +1563,20 @@ def valid_branch_name(root: Path, name: str) -> bool:
     return result.returncode == 0
 
 
+def tag_names(root: Path) -> List[str]:
+    result = git(root, "tag", "--list", "--sort=-creatordate", timeout=15)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.out.splitlines() if line.strip()]
+
+
+def valid_tag_name(root: Path, name: str) -> bool:
+    if not name or name.startswith("-"):
+        return False
+    result = git(root, "check-ref-format", f"refs/tags/{name}", timeout=10)
+    return result.returncode == 0
+
+
 def remote_default_branch(root: Path) -> Optional[str]:
     value = git_out(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
     if value and "/" in value:
@@ -1558,7 +1603,8 @@ def create_worktree_backup(root: Path, label: str = "working-tree") -> Optional[
         git_dir = root / git_dir
     backup_dir = git_dir / "git-create-backups"
     try:
-        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(backup_dir, 0o700)
     except OSError:
         return None
     patch = backup_dir / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.patch"
@@ -1567,6 +1613,7 @@ def create_worktree_backup(root: Path, label: str = "working-tree") -> Optional[
         return None
     try:
         patch.write_text(result.out, encoding="utf-8")
+        os.chmod(patch, 0o600)
     except OSError:
         return None
     return patch
@@ -2935,6 +2982,10 @@ class App:
                     "14": self.branches_action,
                     "15": self.revert_action,
                     "16": self.docker_action,
+                    "17": self.stash_action,
+                    "18": self.merge_rebase_action,
+                    "19": self.tags_action,
+                    "20": self.inspector_action,
                 }
                 action = actions.get(choice)
                 if action is None:
@@ -2987,6 +3038,10 @@ class App:
             ("14", "Branches: list/create/switch/rename/delete/upstream"),
             ("15", "Undo/revert: local changes, commits, remote-safe revert"),
             ("16", "Add Dockerfile and GHCR publishing workflow"),
+            ("17", "Stash: save/list/show/apply/pop/drop"),
+            ("18", "Merge/rebase: guided operations and conflict recovery"),
+            ("19", "Tags/releases: create, sign, push, delete, GitHub release"),
+            ("20", "Repository inspector: status/diffs/log/file history"),
             ("0", "Exit"),
         ]
         for number, label in items:
@@ -3081,6 +3136,16 @@ class App:
                 git revert                Create a new commit that reverses an old commit.
                                           Why: safely undo shared history without force-pushing.
 
+                git stash                 Save, list, apply, or drop uncommitted changes.
+                                          Why: move between tasks without making a commit.
+
+                git merge / rebase        Integrate or replay branch histories.
+                                          Why: merge preserves shared history; rebase is
+                                          restricted to local-only commits.
+
+                git tag / gh release      Mark commits and publish GitHub releases.
+                                          Why: version and distribute checkpoints.
+
                 gh repo create            Create a GitHub repository and optionally push.
                 gh repo clone             Clone a GitHub repository using gh authentication.
                 gh repo rename            Rename the GitHub repository and update origin.
@@ -3165,6 +3230,26 @@ class App:
                    Creates a starter Dockerfile and a GitHub Actions workflow
                    that builds and pushes to ghcr.io using GITHUB_TOKEN. Existing
                    files are never overwritten.
+
+                Stash (option 17)
+                   Saves, lists, inspects, applies, pops, and drops local stashes.
+                   Drop requires a typed confirmation and keeps a patch backup.
+
+                Merge/rebase (option 18)
+                   Merges a branch, rebases only local commits, continues/aborts
+                   conflicts, and never force-pushes. A safety ref is created.
+
+                Tags/releases (option 19)
+                   Creates annotated or signed tags, pushes/deletes them safely,
+                   and creates GitHub releases from existing tags.
+
+                Inspector (option 20)
+                   Read-only status, staged/unstaged diffs, log graph, commit
+                   details, file history, remotes, branches, tags, and upstream.
+
+                Scan (option 2)
+                   After scanning, 'a' runs local verification on every repository
+                   found and prints a batch summary.
                 """
             )
         )
@@ -3283,8 +3368,14 @@ class App:
         print_scan_results(path, repos, depth)
         if not repos:
             return
-        choice = ask("Number to make active and verify (Enter to return)", allow_empty=True)
+        choice = ask(
+            "Number to activate, 'a' to verify all locally, or Enter to return",
+            allow_empty=True,
+        )
         if not choice:
+            return
+        if choice.strip().lower() in ("a", "all"):
+            self.batch_verify_repos(repos)
             return
         try:
             index = int(choice)
@@ -3298,6 +3389,73 @@ class App:
         success(f"Active project: {self.project}")
         if confirm("Run verification now?", True):
             self.verify_path(self.project)
+
+    def batch_verify_repos(self, repos: Sequence[Dict[str, object]]) -> None:
+        if not repos:
+            info("No repositories to verify.")
+            return
+        if not confirm(f"Run local verification on {len(repos)} repositories?", True):
+            return
+        config = read_global_config()
+        global_report = build_global_report(config, deep=False)
+        global_problems = [
+            check
+            for section in global_report.sections
+            for check in section.checks
+            if check.level in ("FAIL", "WARN")
+        ]
+        repo_word = "repository" if len(repos) == 1 else "repositories"
+        heading(f"Batch local verification: {len(repos)} {repo_word}")
+        if global_problems:
+            warning(f"{len(global_problems)} global issue(s); they affect every repository.")
+            for check in global_problems[:8]:
+                print_check(check, show_hint=False)
+            if len(global_problems) > 8:
+                print(f"      ... and {len(global_problems) - 8} more global issue(s).")
+            print()
+        else:
+            success("Global checks have no warnings or failures.")
+        total_fail = total_warn = 0
+        results: List[Tuple[Dict[str, object], int, int, List[Check]]] = []
+        for repo in repos:
+            repo_path = Path(str(repo["path"]))
+            report = build_project_report(
+                repo_path,
+                deep=False,
+                scan_content=True,
+                global_config=config,
+            )
+            checks = report.checks()
+            failures = [check for check in checks if check.level == "FAIL"]
+            warnings = [check for check in checks if check.level == "WARN"]
+            total_fail += len(failures)
+            total_warn += len(warnings)
+            results.append((repo, len(failures), len(warnings), failures + warnings))
+            marker = "FAIL" if failures else ("WARN" if warnings else "PASS")
+            print(
+                f"  {col(LEVEL_MARKER[marker], *LEVEL_STYLE[marker])} "
+                f"{repo['name']}: {len(checks)} checks, "
+                f"{len(failures)} failure(s), {len(warnings)} warning(s)"
+            )
+            for check in (failures + warnings)[:4]:
+                print(
+                    f"      {LEVEL_MARKER[check.level]} {check.label}"
+                    + (f" - {one_line(check.detail, 100)}" if check.detail else "")
+                )
+        dirty = [repo for repo, _, _, _ in results if repo.get("dirty")]
+        print()
+        global_failures = sum(1 for check in global_problems if check.level == "FAIL")
+        print(
+            f"Batch summary: {len(repos)} {repo_word}, "
+            f"{col(str(total_fail), 'red')} project failure(s), "
+            f"{col(str(total_warn), 'yellow')} project warning(s), "
+            f"{len(global_problems)} global issue(s), "
+            f"{len(dirty)} dirty working tree(s)."
+        )
+        if total_fail == 0 and global_failures == 0:
+            success("No blocking local issues found across the scanned repositories.")
+        else:
+            warning("Review failures before making commits or pushing any repository.")
 
     def revert_action(self) -> None:
         path = self.require_project()
@@ -3487,6 +3645,656 @@ class App:
             success(f"Last commit removed from history; changes are staged. Safety ref: {backup}")
         else:
             failure("Soft reset failed; no history was changed.")
+
+    def stash_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "A stash saves uncommitted working-tree changes on a stack so you can restore "
+            "a clean working tree, switch context, or pull safely.",
+            "Stashes are local and are not part of normal commit history. This menu can "
+            "save, list, inspect, apply, pop, and drop them.",
+            "Applying keeps the stash. Popping removes it only when Git succeeds. Dropping "
+            "requires a typed confirmation and a patch backup when possible.",
+        )
+        while True:
+            stashes = git_out(path, "stash", "list")
+            heading("Stash helpers")
+            print(stashes if stashes else "  (no stashes)")
+            status = git_out(path, "status", "--short")
+            if status:
+                print(col("Working tree:", "bold"))
+                print(status)
+            print()
+            print("  1) Save current changes to a new stash")
+            print("  2) Show stash list")
+            print("  3) Show a stash diff")
+            print("  4) Apply a stash (keep it)")
+            print("  5) Pop a stash (apply and remove on success)")
+            print("  6) Drop a stash (typed confirmation)")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                if in_progress_operations(path):
+                    failure("A Git operation is in progress; finish or abort it before stashing.")
+                    continue
+                entries = status_entries(path)
+                if not entries:
+                    info("The working tree has no changes to stash.")
+                    continue
+                message = ask("Stash message (optional)", allow_empty=True)
+                include_untracked = confirm("Include untracked files in the stash?", False)
+                command = ["git", "stash", "push"]
+                if include_untracked:
+                    command.append("--include-untracked")
+                if message:
+                    command.extend(["-m", message])
+                explain(
+                    "Runs git stash push. The selected working-tree changes are saved on the "
+                    "local stash stack and removed from the working tree.",
+                    "This is useful when you need a clean tree for a switch, pull, or merge "
+                    "without making a commit.",
+                    "Untracked files are included only if you chose that option. Ignored files "
+                    "are never included.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Stash the current changes?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Changes saved to a new stash.")
+                else:
+                    failure("Stash save failed.")
+            elif choice == "2":
+                print(stashes if stashes else "No stashes.")
+            elif choice == "3":
+                ref = resolve_stash_ref(ask("Stash number or stash@{N}", default="0"))
+                if not ref:
+                    failure("Invalid stash reference.")
+                    continue
+                result = git(path, "stash", "show", "-p", "--include-untracked", ref, timeout=30)
+                if result.returncode != 0:
+                    failure("Could not show that stash.")
+                    continue
+                lines = result.out.splitlines()
+                for line in lines[:200]:
+                    print(line)
+                if len(lines) > 200:
+                    info("Stash diff truncated after 200 lines.")
+            elif choice in ("4", "5"):
+                ref = resolve_stash_ref(ask("Stash number or stash@{N}", default="0"))
+                if not ref:
+                    failure("Invalid stash reference.")
+                    continue
+                if choice == "5":
+                    backup = create_stash_backup(path, ref, "stash-pop")
+                    if backup:
+                        info(f"Backup patch: {backup}")
+                command = ["git", "stash", "apply" if choice == "4" else "pop", ref]
+                explain(
+                    f"Runs {'git stash apply' if choice == '4' else 'git stash pop'} {ref}.",
+                    "Apply restores the changes and keeps the stash. Pop restores them and "
+                    "drops the stash only if applying succeeds.",
+                    "Conflicts leave the operation in your working tree. The stash is not "
+                    "discarded on a failed pop.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Restore this stash?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Stash restored.")
+                else:
+                    failure("Stash restore did not complete; check git status for conflicts.")
+            elif choice == "6":
+                ref = resolve_stash_ref(ask("Stash number or stash@{N}", default="0"))
+                if not ref:
+                    failure("Invalid stash reference.")
+                    continue
+                backup = create_stash_backup(path, ref, "stash-drop")
+                if not backup:
+                    failure("Could not create a backup patch; stash drop cancelled.")
+                    continue
+                info(f"Backup patch: {backup}")
+                explain(
+                    f"Runs git stash drop {ref}. This removes the stash entry from the local stack.",
+                    "The backup patch preserves the diff so you can re-apply it with git apply. "
+                    "The operation is local and does not touch remotes.",
+                    "A typed confirmation is required.",
+                )
+                phrase = "DROP STASH"
+                typed = ask(f'Type "{phrase}" to drop {ref}', allow_empty=True)
+                if typed != phrase:
+                    info("Stash drop cancelled.")
+                    continue
+                result = run_cmd(["git", "stash", "drop", ref], cwd=path, timeout=30)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Stash dropped; backup patch was kept.")
+                else:
+                    failure("Stash drop failed.")
+            else:
+                warning("Unknown option.")
+
+    def merge_rebase_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "Merge combines histories and preserves them. Rebase replays local commits on a "
+            "new base and therefore rewrites only local history.",
+            "Merging is safe for shared branches. Rebasing can produce a cleaner local history "
+            "but must not rewrite commits that exist on a remote.",
+            "Both operations require a clean working tree. The app creates a safety ref first, "
+            "never auto-resolves conflicts, and never force-pushes.",
+        )
+        while True:
+            current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "(detached HEAD)"
+            operation = git_operation_kind(path)
+            operations = in_progress_operations(path)
+            heading("Merge and rebase")
+            print(f"  Current branch: {col(current, 'cyan')}")
+            print(f"  Operation:      {operation or 'none'}")
+            if operations and not operation:
+                print("  Other operation: " + ", ".join(operations))
+            print()
+            print("  1) Merge a branch into the current branch")
+            print("  2) Rebase the current branch onto another branch")
+            print("  3) Continue an in-progress merge/rebase")
+            print("  4) Abort an in-progress merge/rebase")
+            print("  5) Show branch graph")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                self.merge_branch(path)
+            elif choice == "2":
+                self.rebase_branch(path)
+            elif choice == "3":
+                self.continue_merge_rebase(path)
+            elif choice == "4":
+                self.abort_merge_rebase(path)
+            elif choice == "5":
+                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+            else:
+                warning("Unknown option.")
+
+    def merge_branch(self, path: Path) -> None:
+        if git_operation_kind(path) or in_progress_operations(path):
+            failure("A Git operation is already in progress; continue or abort it first.")
+            return
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not current:
+            failure("Detached HEAD; check out a branch before merging.")
+            return
+        if status_entries(path):
+            failure("Working tree is not clean. Commit or stash changes before merging.")
+            return
+        local = local_branch_names(path)
+        remote = remote_branch_names(path)
+        candidates = [item for item in local + remote if item != current]
+        if not candidates:
+            warning("No other branches are available to merge.")
+            return
+        print("  Merge candidates: " + ", ".join(candidates))
+        target = ask("Branch to merge into current branch")
+        if target == current or target not in candidates:
+            failure("Choose a different local or remote branch from the list.")
+            return
+        backup = create_backup_ref(path, f"before-merge-{current}")
+        if backup:
+            info(f"Safety ref: {backup}")
+        explain(
+            f"Runs git merge --no-edit {target}. Git combines the target history into '{current}'.",
+            "Merging preserves both histories and is safe when other people already have the "
+            "branch. A fast-forward may occur if the current branch has no unique commits.",
+            "Conflicts are left in the working tree. The app does not auto-resolve them or "
+            "force-push anything.",
+        )
+        command = ["git", "merge", "--no-edit", target]
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Merge '{target}' into '{current}'?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=180)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Merge did not complete. Check for conflicts.")
+            info("Use option 3 to continue after resolving, or option 4 to abort.")
+            return
+        success("Merge completed.")
+        if "origin" in remote_urls(path) and confirm("Push the merged branch now (normal push)?", False):
+            self.push_current(path)
+
+    def rebase_branch(self, path: Path) -> None:
+        if git_operation_kind(path) or in_progress_operations(path):
+            failure("A Git operation is already in progress; continue or abort it first.")
+            return
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not current:
+            failure("Detached HEAD; check out a branch before rebasing.")
+            return
+        if status_entries(path):
+            failure("Working tree is not clean. Commit or stash changes before rebasing.")
+            return
+        local = local_branch_names(path)
+        remote = remote_branch_names(path)
+        candidates = [item for item in local + remote if item != current]
+        if not candidates:
+            warning("No other branches are available as a rebase base.")
+            return
+        print("  Rebase bases: " + ", ".join(candidates))
+        target = ask("Rebase current branch onto")
+        if target == current or target not in candidates:
+            failure("Choose a different local or remote branch from the list.")
+            return
+        shared, count = shared_commit_in_range(path, target)
+        if shared == "LIMIT":
+            failure(f"More than {count} commits would be considered; rebase cancelled for safety.")
+            info("Use a merge, or inspect the range manually before rebasing.")
+            return
+        if shared:
+            failure(f"Commit {shared[:12]} is already contained in a remote branch or tag.")
+            info("Rebasing would rewrite shared history and require a force push. Use merge or git revert instead.")
+            return
+        if count == 0:
+            info(f"'{current}' has no commits beyond '{target}'; nothing to rebase.")
+            return
+        backup = create_backup_ref(path, f"before-rebase-{current}")
+        if backup:
+            info(f"Safety ref: {backup}")
+        explain(
+            f"Runs git rebase {target}. Git replays the {count} local commit(s) on top of "
+            f"'{target}'.",
+            "Rebase gives a linear local history. It is allowed here only when none of those "
+            "commits are contained in a remote branch or tag.",
+            "Conflicts stop the rebase. Resolve them and use option 3, or abort with option 4. "
+            "The app never force-pushes the rewritten branch.",
+        )
+        command = ["git", "rebase", target]
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Rebase '{current}' onto '{target}'?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Rebase did not complete. Check for conflicts.")
+            info("Use option 3 to continue after resolving, or option 4 to abort.")
+            return
+        success("Rebase completed.")
+        if "origin" in remote_urls(path) and confirm("Push the rebased branch now (normal push)?", False):
+            self.push_current(path)
+
+    def continue_merge_rebase(self, path: Path) -> None:
+        operation = git_operation_kind(path)
+        if not operation:
+            info("No merge or rebase is in progress.")
+            return
+        explain(
+            f"Runs git {'merge' if operation == 'merge' else 'rebase'} --continue.",
+            "This continues after conflicts have been resolved and staged. Your editor may "
+            "open for a merge commit message.",
+            "The operation stops again if conflicts remain. The app never resolves conflicts "
+            "or discards work automatically.",
+        )
+        if not confirm(f"Continue the {operation} now?", True):
+            return
+        code = run_interactive(["git", operation, "--continue"], cwd=path)
+        if code == 0:
+            success(f"{operation.capitalize()} continued successfully.")
+        else:
+            failure(f"{operation.capitalize()} did not complete. Resolve remaining conflicts or abort.")
+
+    def abort_merge_rebase(self, path: Path) -> None:
+        operation = git_operation_kind(path)
+        if not operation:
+            info("No merge or rebase is in progress.")
+            return
+        explain(
+            f"Runs git {operation} --abort.",
+            "Abort restores the pre-operation branch state as far as Git can. Any conflict "
+            "resolution edits made during the operation may be discarded.",
+            "A typed confirmation is required. The app does not abort other operation types.",
+        )
+        phrase = "ABORT"
+        typed = ask(f'Type "{phrase}" to abort the {operation}', allow_empty=True)
+        if typed != phrase:
+            info("Abort cancelled.")
+            return
+        code = run_interactive(["git", operation, "--abort"], cwd=path)
+        if code == 0:
+            success(f"{operation.capitalize()} aborted.")
+        else:
+            failure(f"Could not abort the {operation}.")
+
+    def tags_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "Tags are stable names for specific commits. Annotated tags carry a message; "
+            "signed tags add a cryptographic signature.",
+            "Tags mark releases or important checkpoints. GitHub releases are built on top "
+            "of tags and can carry release notes.",
+            "The app never force-pushes tags. Deleting a local tag creates a safety ref, and "
+            "remote tag deletion requires a typed confirmation.",
+        )
+        while True:
+            tags = tag_names(path)
+            heading("Tags and releases")
+            print("  Tags: " + (", ".join(tags) if tags else "(none)"))
+            print()
+            print("  1) List tags in detail")
+            print("  2) Create an annotated or signed tag")
+            print("  3) Show/verify a tag")
+            print("  4) Push a tag to origin")
+            print("  5) Delete a local tag")
+            print("  6) Delete a remote origin tag")
+            print("  7) Create a GitHub release from a tag")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                if not tags:
+                    info("No tags.")
+                else:
+                    for tag in tags:
+                        print(
+                            git_out(
+                                path,
+                                "for-each-ref",
+                                f"--format=%(refname:short) %(objecttype) %(objectname:short) %(contents:subject)",
+                                f"refs/tags/{tag}",
+                            )
+                        )
+            elif choice == "2":
+                self.create_tag(path)
+            elif choice == "3":
+                tag = ask("Tag to show")
+                if tag not in tag_names(path):
+                    failure(f"Unknown tag: {tag}")
+                    continue
+                print(git_out(path, "show", "--no-patch", "--format=fuller", "--decorate", tag))
+                verify = git(path, "tag", "-v", tag, timeout=30)
+                print(verify.combined or "(no signature verification output)")
+            elif choice == "4":
+                tag = ask("Tag to push")
+                if tag not in tag_names(path):
+                    failure(f"Unknown local tag: {tag}")
+                    continue
+                self.push_tag(path, tag)
+            elif choice == "5":
+                self.delete_local_tag(path)
+            elif choice == "6":
+                self.delete_remote_tag(path)
+            elif choice == "7":
+                self.create_github_release(path)
+            else:
+                warning("Unknown option.")
+
+    def create_tag(self, path: Path) -> None:
+        name = ask("Tag name (for example v1.2.3)")
+        if not valid_tag_name(path, name):
+            failure("That is not a valid Git tag name.")
+            return
+        if name in tag_names(path):
+            failure(f"Tag already exists: {name}")
+            return
+        target = ask("Commit to tag (hash, branch, or HEAD)", default="HEAD")
+        if git(path, "rev-parse", "--verify", "--quiet", f"{target}^{{commit}}").returncode != 0:
+            failure(f"Unknown commit: {target}")
+            return
+        config = read_global_config()
+        signed_default = "s" if cfg_get(config, "tag.gpgsign").lower() == "true" else "a"
+        tag_type = ask("Tag type [s]igned/[a]nnotated/[l]ightweight", default=signed_default).lower()
+        if tag_type not in ("s", "signed", "a", "annotated", "l", "lightweight"):
+            failure("Choose signed, annotated, or lightweight.")
+            return
+        message = ask("Tag message", default=name)
+        if tag_type in ("s", "signed"):
+            command = ["git", "tag", "-s", name, "-m", message, target]
+            why = "A signed tag carries your SSH signature and can be verified by others."
+        elif tag_type in ("a", "annotated"):
+            command = ["git", "tag", "-a", name, "-m", message, target]
+            why = "An annotated tag stores a message, author, and date as a Git object."
+        else:
+            command = ["git", "tag", name, target]
+            why = "A lightweight tag is just a ref pointing directly at the commit."
+        explain(
+            f"Creates tag '{name}' at {target}.",
+            why,
+            "A tag is local until you push it. The app never overwrites an existing tag.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Create tag '{name}'?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=180)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Tag creation failed.")
+            if "s" in tag_type:
+                print_signing_help()
+            return
+        success(f"Tag '{name}' created.")
+        if "origin" in remote_urls(path) and confirm("Push this tag to origin now?", False):
+            self.push_tag(path, name)
+
+    def push_tag(self, path: Path, tag: str) -> bool:
+        if "origin" not in remote_urls(path):
+            failure("No origin remote.")
+            return False
+        explain(
+            f"Runs git push origin refs/tags/{tag}. Tag pushes are normal pushes and never force.",
+            "Other clones and GitHub do not see a local tag until it is pushed.",
+            "If the remote already has a different tag with this name, Git rejects the push. "
+            "The app does not overwrite it with force.",
+        )
+        command = ["git", "push", "origin", f"refs/tags/{tag}"]
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Push tag '{tag}'?", True):
+            return False
+        result = run_cmd(command, cwd=path, timeout=120, env_extra=remote_env())
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Tag '{tag}' pushed.")
+            return True
+        failure("Tag push failed. No force was used.")
+        return False
+
+    def delete_local_tag(self, path: Path) -> None:
+        tag = ask("Local tag to delete")
+        if tag not in tag_names(path):
+            failure(f"Unknown local tag: {tag}")
+            return
+        backup = create_backup_ref(path, f"deleted-tag-{tag}", f"refs/tags/{tag}")
+        if backup:
+            info(f"Safety ref: {backup}")
+        explain(
+            f"Runs git tag -d {tag}.",
+            "This removes the local tag name. A safety ref preserves the tag object/commit "
+            "locally until you clean it up.",
+            "The remote tag is not deleted. A typed confirmation is required.",
+        )
+        phrase = f"DELETE TAG {tag}"
+        typed = ask(f'Type "{phrase}" to continue', allow_empty=True)
+        if typed != phrase:
+            info("Tag deletion cancelled.")
+            return
+        result = run_cmd(["git", "tag", "-d", tag], cwd=path, timeout=30)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Local tag '{tag}' deleted. Safety ref: {backup}")
+        else:
+            failure("Tag deletion failed.")
+
+    def delete_remote_tag(self, path: Path) -> None:
+        if "origin" not in remote_urls(path):
+            failure("No origin remote.")
+            return
+        tag = ask("Remote tag to delete")
+        if not valid_tag_name(path, tag):
+            failure("Invalid tag name.")
+            return
+        if tag not in tag_names(path):
+            if not confirm(f"Fetch tag '{tag}' from origin first?", True):
+                return
+            fetched = run_cmd(["git", "fetch", "origin", f"refs/tags/{tag}:refs/tags/{tag}"], cwd=path, timeout=120, env_extra=remote_env())
+            if fetched.returncode != 0:
+                failure("Could not fetch that tag from origin.")
+                return
+        backup = create_backup_ref(path, f"deleted-remote-tag-{tag}", f"refs/tags/{tag}")
+        if backup:
+            info(f"Local safety ref: {backup}")
+        explain(
+            f"Runs git push origin --delete refs/tags/{tag}.",
+            "The remote tag is removed for everyone who fetches it. The local tag and safety "
+            "ref remain.",
+            "This is a normal delete, not a force-push. A typed confirmation is required.",
+        )
+        phrase = f"DELETE REMOTE TAG {tag}"
+        typed = ask(f'Type "{phrase}" to continue', allow_empty=True)
+        if typed != phrase:
+            info("Remote tag deletion cancelled.")
+            return
+        result = run_cmd(
+            ["git", "push", "origin", "--delete", f"refs/tags/{tag}"],
+            cwd=path,
+            timeout=120,
+            env_extra=remote_env(),
+        )
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Remote tag '{tag}' deleted.")
+        else:
+            failure("Remote tag deletion failed. No force was used.")
+
+    def create_github_release(self, path: Path) -> None:
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        tag = ask("Tag for the GitHub release")
+        if tag not in tag_names(path):
+            failure(f"Local tag not found: {tag}")
+            info("Create the tag with option 2 first.")
+            return
+        remote_tag = git(path, "ls-remote", "origin", f"refs/tags/{tag}", timeout=60, env_extra=remote_env())
+        if remote_tag.returncode != 0:
+            failure("Could not check the remote tag.")
+            return
+        local_oid = git_out(path, "rev-parse", f"refs/tags/{tag}")
+        if not remote_tag.out.strip():
+            if not confirm(f"Tag '{tag}' is not on origin. Push it first?", True):
+                return
+            if not self.push_tag(path, tag):
+                return
+        else:
+            remote_oid = remote_tag.out.splitlines()[0].split()[0] if remote_tag.out.split() else ""
+            if remote_oid and local_oid and remote_oid != local_oid:
+                failure("The local and remote tags point to different objects.")
+                info("Fetch and inspect the tag before creating a release; no release was created.")
+                return
+        title = ask("Release title", default=tag)
+        notes = ask("Release notes (leave empty to generate notes)", allow_empty=True)
+        draft = confirm("Create as a draft release?", False)
+        command = [which_gh() or "gh", "release", "create", tag, "--title", title, "--verify-tag"]
+        if notes:
+            command.extend(["--notes", notes])
+        else:
+            command.append("--generate-notes")
+        if draft:
+            command.append("--draft")
+        explain(
+            f"Runs gh release create {tag}. This creates a GitHub release associated with "
+            "the existing remote tag.",
+            "A release gives the tag a title, notes, and a place for downloadable assets. "
+            "It does not change Git history.",
+            "The app refuses to overwrite an existing release and never modifies tags with "
+            "force.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Create GitHub release '{tag}'?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=120)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"GitHub release '{tag}' created.")
+        else:
+            failure("GitHub release creation failed.")
+
+    def inspector_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "This read-only inspector shows status, staged and unstaged diffs, recent "
+            "history, commit details, file history, and repository references.",
+            "Inspecting state before acting prevents accidental commits, pushes, deletes, "
+            "and merges.",
+            "Nothing here changes files, index state, branches, tags, or remotes.",
+        )
+        while True:
+            heading("Repository inspector")
+            print("  1) Status and summary")
+            print("  2) Staged diff")
+            print("  3) Unstaged diff")
+            print("  4) Recent commit graph")
+            print("  5) Show a commit")
+            print("  6) File history")
+            print("  7) Remotes, branches, tags, and upstream")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                print(git_out(path, "status", "-sb"))
+                print()
+                print(col("Staged:", "bold"))
+                print(git_out(path, "diff", "--cached", "--stat") or "(nothing)")
+                print(col("Unstaged:", "bold"))
+                print(git_out(path, "diff", "--stat") or "(nothing)")
+            elif choice == "2":
+                show_diff(path, cached=True)
+            elif choice == "3":
+                show_diff(path, cached=False)
+            elif choice == "4":
+                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+            elif choice == "5":
+                revision = ask("Commit to show", default="HEAD")
+                if git(path, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}").returncode != 0:
+                    failure(f"Unknown commit: {revision}")
+                    continue
+                print(git_out(path, "show", "--stat", "--oneline", "--decorate", revision))
+            elif choice == "6":
+                filename = ask("Path to inspect (relative to repository root)")
+                result = git(path, "log", "--follow", "--oneline", "-n", "30", "--", filename, timeout=30)
+                if result.returncode != 0:
+                    failure("Could not read file history.")
+                else:
+                    print(result.out or "(no history for that path)")
+            elif choice == "7":
+                print(col("Remotes:", "bold"))
+                print(git_out(path, "remote", "-v") or "(none)")
+                print(col("Branches:", "bold"))
+                print(git_out(path, "branch", "-vv") or "(none)")
+                print(col("Tags:", "bold"))
+                print(git_out(path, "tag", "--list", "--sort=-creatordate") or "(none)")
+            else:
+                warning("Unknown option.")
 
     def branches_action(self) -> None:
         path = self.require_project()
@@ -3745,7 +4553,10 @@ class App:
         default = remote_default_branch(path)
         if not default:
             _, default, _ = check_remote_access(path)
-        if default and branch_name == default:
+        if not default:
+            failure("Could not determine the remote default branch; deletion cancelled for safety.")
+            return
+        if branch_name == default:
             failure(f"Refusing to delete the remote default branch '{branch_name}'.")
             return
         backup = create_backup_ref(path, f"deleted-remote-{branch_name}", target)
@@ -3815,7 +4626,7 @@ class App:
             "Creates a starter Dockerfile and a GitHub Actions workflow that builds and "
             "pushes the image to GitHub Container Registry (ghcr.io).",
             "A container image gives you a reproducible runtime, and the workflow publishes "
-            "it automatically on pushes to main and version tags.",
+            "it automatically on pushes to the detected default branch and version tags.",
             "Existing Dockerfile or workflow files are never overwritten. The workflow uses "
             "the repository's GITHUB_TOKEN; no registry password is stored in the repo.",
         )
@@ -3895,8 +4706,14 @@ class App:
         if not (path / ".dockerignore").exists():
             warning(".dockerignore was not created; the Docker build context may include .git, secrets, or large files.")
         if not workflow.exists():
-            content = GHCR_WORKFLOW_TEMPLATE.replace("__IMAGE__", image)
+            workflow_branch = remote_default_branch(path) or git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "main"
+            content = (
+                GHCR_WORKFLOW_TEMPLATE
+                .replace("__IMAGE__", image)
+                .replace("__BRANCH__", json.dumps(workflow_branch))
+            )
             write_new_file(workflow, content, "GHCR workflow")
+            info(f"Workflow push branch: {workflow_branch}")
         else:
             info(f"Workflow already exists: {workflow}")
 
@@ -5061,6 +5878,7 @@ class App:
             print("  6) Create .gitattributes")
             print("  7) Create all safe missing files")
             print("  0) Back")
+            print(col("  Dockerfile and GHCR workflow: use option 16.", "dim"))
             choice = ask("Choose an option", default="0", allow_empty=True)
             changed = False
             if choice in ("0", ""):
@@ -5263,21 +6081,61 @@ def worktree_mismatch(root: Path, paths: Sequence[str]) -> List[str]:
     return [item for item in result.out.split("\0") if item]
 
 
-def show_staged_diff(root: Path, max_lines: int = 200) -> None:
-    """Print a bounded reviewable diff of what will be committed."""
-    result = git(root, "diff", "--cached", "--no-color", "--", timeout=30)
+def show_diff(root: Path, cached: bool = False, max_lines: int = 200) -> None:
+    """Print a bounded diff of staged or unstaged changes."""
+    args = ["git", "diff", "--no-color"]
+    if cached:
+        args.append("--cached")
+    result = run_cmd(args, cwd=root, timeout=30)
+    label = "Staged diff" if cached else "Unstaged diff"
     if result.returncode != 0:
-        warning("Could not display the staged diff: " + one_line(result.combined))
+        warning(f"Could not display the {label.lower()}: " + one_line(result.combined))
         return
     lines = result.out.splitlines()
     if not lines:
-        info("The staged diff is empty.")
+        info(f"The {label.lower()} is empty.")
         return
-    print(col("Staged diff:", "bold"))
+    print(col(label + ":", "bold"))
     for line in lines[:max_lines]:
         print(line)
     if len(lines) > max_lines:
-        info(f"Diff truncated after {max_lines} lines. Use 'git diff --cached' to view the rest.")
+        info(f"Diff truncated after {max_lines} lines. Use 'git diff' manually to view the rest.")
+
+
+def show_staged_diff(root: Path, max_lines: int = 200) -> None:
+    """Print a bounded reviewable diff of what will be committed."""
+    show_diff(root, cached=True, max_lines=max_lines)
+
+
+def resolve_stash_ref(value: str) -> Optional[str]:
+    value = value.strip()
+    if value.isdigit():
+        return f"stash@{{{value}}}"
+    if re.fullmatch(r"stash@\{\d+\}", value):
+        return value
+    return None
+
+
+def create_stash_backup(root: Path, stash_ref: str, label: str = "stash") -> Optional[Path]:
+    git_dir_raw = git_out(root, "rev-parse", "--git-dir")
+    if not git_dir_raw:
+        return None
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    backup_dir = git_dir / "git-create-backups"
+    result = git(root, "stash", "show", "-p", "--include-untracked", stash_ref, timeout=30)
+    if result.returncode != 0:
+        return None
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(backup_dir, 0o700)
+        patch = backup_dir / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.patch"
+        patch.write_text(result.out, encoding="utf-8")
+        os.chmod(patch, 0o600)
+    except OSError:
+        return None
+    return patch
 
 
 def unstage_paths(root: Path, paths: Sequence[str]) -> bool:
