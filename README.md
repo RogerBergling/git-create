@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.4.0**.
+Current version: **1.4.1**.
 
 ## Contents
 
@@ -15,6 +15,7 @@ Current version: **1.4.0**.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Screenshots](#screenshots)
 - [Git in plain English](#git-in-plain-english)
 - [What each command does and why](#what-each-command-does-and-why)
 - [How the app teaches while you use it](#how-the-app-teaches-while-you-use-it)
@@ -48,6 +49,23 @@ The app is deliberately conservative:
 - no automatic merge/rebase of diverged histories
 - no overwriting existing project files
 - no silent commits containing `.env`, keys, tokens, or other secrets
+
+## Screenshots
+
+### Main menu and startup quick check
+
+<img src="docs/screenshots/main-menu.svg" alt="git-create startup quick check and main menu" width="900">
+
+### Full verification report
+
+<img src="docs/screenshots/verification.svg" alt="git-create verification report" width="900">
+
+### Branch management with command explanation
+
+<img src="docs/screenshots/branch-menu.svg" alt="git-create branch management menu and explanation" width="900">
+
+The screenshots are illustrative terminal renders of the actual menu and report
+layouts. Paths, account names, and results are examples.
 
 ## Why I built this app
 
@@ -640,12 +658,13 @@ Menu option **18** provides:
 - show the branch graph
 
 Both operations require a clean working tree and create a safety ref first.
-Merging preserves shared history. Rebasing is allowed only when the commits
-being replayed are not contained in any remote branch or tag; the app checks
-each local commit and refuses if rewriting shared history would require a force
-push. Rebase is also refused for ranges larger than 200 commits, where the
-safety check would be expensive. Conflicts are continued or aborted explicitly;
-the app never auto-resolves them and never force-pushes.
+Merging preserves shared history. Rebasing fetches remotes first when any are
+configured, then allows the operation only when the commits being replayed are
+not contained in any remote branch or tag; it refuses if rewriting shared
+history would require a force push. Rebase is also refused for ranges larger
+than 200 commits, where the safety check would be expensive. Conflicts are
+continued or aborted explicitly; the app never auto-resolves them and never
+force-pushes.
 
 ## Tags and releases
 
@@ -1086,6 +1105,7 @@ README.md               # this documentation
 .gitignore              # repository hygiene for the app itself
 .dockerignore           # keeps the Docker context clean if one is ever added
 .editorconfig           # consistent indentation and line endings across editors
+docs/screenshots/       # terminal-style README screenshots (SVG)
 examples/generated/     # showcase copies of generated files (not runtime deps)
 ```
 

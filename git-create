@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 APP = "git-create"
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -3733,8 +3733,10 @@ class App:
                     continue
                 if choice == "5":
                     backup = create_stash_backup(path, ref, "stash-pop")
-                    if backup:
-                        info(f"Backup patch: {backup}")
+                    if not backup:
+                        failure("Could not create a backup patch; pop cancelled.")
+                        continue
+                    info(f"Backup patch: {backup}")
                 command = ["git", "stash", "apply" if choice == "4" else "pop", ref]
                 explain(
                     f"Runs {'git stash apply' if choice == '4' else 'git stash pop'} {ref}.",
@@ -3851,8 +3853,10 @@ class App:
             failure("Choose a different local or remote branch from the list.")
             return
         backup = create_backup_ref(path, f"before-merge-{current}")
-        if backup:
-            info(f"Safety ref: {backup}")
+        if not backup:
+            failure("Could not create a safety ref; merge cancelled.")
+            return
+        info(f"Safety ref: {backup}")
         explain(
             f"Runs git merge --no-edit {target}. Git combines the target history into '{current}'.",
             "Merging preserves both histories and is safe when other people already have the "
@@ -3897,6 +3901,18 @@ class App:
         if target == current or target not in candidates:
             failure("Choose a different local or remote branch from the list.")
             return
+        if remote_urls(path):
+            if not confirm("Fetch remotes before checking whether history is shared?", True):
+                return
+            fetch = run_cmd(
+                ["git", "fetch", "--all", "--prune"],
+                cwd=path,
+                timeout=120,
+                env_extra=remote_env(),
+            )
+            if fetch.returncode != 0:
+                failure("Fetch failed; rebase was cancelled because shared history cannot be checked safely.")
+                return
         shared, count = shared_commit_in_range(path, target)
         if shared == "LIMIT":
             failure(f"More than {count} commits would be considered; rebase cancelled for safety.")
@@ -3910,8 +3926,10 @@ class App:
             info(f"'{current}' has no commits beyond '{target}'; nothing to rebase.")
             return
         backup = create_backup_ref(path, f"before-rebase-{current}")
-        if backup:
-            info(f"Safety ref: {backup}")
+        if not backup:
+            failure("Could not create a safety ref; rebase cancelled.")
+            return
+        info(f"Safety ref: {backup}")
         explain(
             f"Runs git rebase {target}. Git replays the {count} local commit(s) on top of "
             f"'{target}'.",
@@ -4120,8 +4138,10 @@ class App:
             failure(f"Unknown local tag: {tag}")
             return
         backup = create_backup_ref(path, f"deleted-tag-{tag}", f"refs/tags/{tag}")
-        if backup:
-            info(f"Safety ref: {backup}")
+        if not backup:
+            failure("Could not create a safety ref; tag deletion cancelled.")
+            return
+        info(f"Safety ref: {backup}")
         explain(
             f"Runs git tag -d {tag}.",
             "This removes the local tag name. A safety ref preserves the tag object/commit "
@@ -4157,8 +4177,10 @@ class App:
                 failure("Could not fetch that tag from origin.")
                 return
         backup = create_backup_ref(path, f"deleted-remote-tag-{tag}", f"refs/tags/{tag}")
-        if backup:
-            info(f"Local safety ref: {backup}")
+        if not backup:
+            failure("Could not create a local safety ref; remote tag deletion cancelled.")
+            return
+        info(f"Local safety ref: {backup}")
         explain(
             f"Runs git push origin --delete refs/tags/{tag}.",
             "The remote tag is removed for everyone who fetches it. The local tag and safety "
@@ -4560,8 +4582,10 @@ class App:
             failure(f"Refusing to delete the remote default branch '{branch_name}'.")
             return
         backup = create_backup_ref(path, f"deleted-remote-{branch_name}", target)
-        if backup:
-            info(f"Local safety ref for the remote tip: {backup}")
+        if not backup:
+            failure("Could not create a local safety ref; remote branch deletion cancelled.")
+            return
+        info(f"Local safety ref for the remote tip: {backup}")
         explain(
             f"Runs git push origin --delete {branch_name}. This removes the branch name from "
             "the remote; it does not rewrite other branches or force-push.",

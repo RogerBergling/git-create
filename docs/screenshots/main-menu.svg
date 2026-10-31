@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="992" viewBox="0 0 1100 992" role="img" aria-labelledby="title desc">
+<title id="title">git-create 1.4.1  ·  ~/Projects/demo-project</title>
+<desc id="desc">Terminal screenshot of the git-create menu-driven Git assistant.</desc>
+<rect width="100%" height="100%" fill="#010409"/>
+<rect x="1" y="1" width="1098" height="990" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<rect x="1" y="1" width="1098" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<rect x="1" y="40" width="1098" height="15" fill="#161b22" stroke="#161b22"/>
+<circle cx="30" cy="28" r="6" fill="#ff5f56"/>
+<circle cx="50" cy="28" r="6" fill="#ffbd2e"/>
+<circle cx="70" cy="28" r="6" fill="#27c93f"/>
+<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create 1.4.1  ·  ~/Projects/demo-project</text>
+<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">git-create 1.4.1 - safe Git/GitHub project assistant</text>
+<text xml:space="preserve" x="28" y="106" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Active project: ~/Projects/demo-project</text>
+<text xml:space="preserve" x="28" y="128" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">New to Git? Option 12 explains the concepts, commands, and why they are used.</text>
+<text xml:space="preserve" x="28" y="150" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="172" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Quick check (local, no network)</text>
+<text xml:space="preserve" x="28" y="194" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> git - git version 2.53.0</text>
+<text xml:space="preserve" x="28" y="216" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> GitHub CLI (gh) - gh version 2.46.0</text>
+<text xml:space="preserve" x="28" y="238" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> user.name - Roger Bergling</text>
+<text xml:space="preserve" x="28" y="260" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> user.email - github@bergling.net</text>
+<text xml:space="preserve" x="28" y="282" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> init.defaultBranch - main</text>
+<text xml:space="preserve" x="28" y="304" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> commit.gpgsign - true</text>
+<text xml:space="preserve" x="28" y="326" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> gpg.ssh.allowedSignersFile - configured</text>
+<text xml:space="preserve" x="28" y="348" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Working tree - clean</text>
+<text xml:space="preserve" x="28" y="370" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  No blocking issues found. Run option 1 for full verification.</text>
+<text xml:space="preserve" x="28" y="392" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="414" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Active project: ~/Projects/demo-project (main, clean)</text>
+<text xml:space="preserve" x="28" y="436" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">------------------------------------------------------------------------------</text>
+<text xml:space="preserve" x="28" y="458" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   1) Verify active project (full check)</text>
+<text xml:space="preserve" x="28" y="480" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   2) Scan a folder for Git repositories</text>
+<text xml:space="preserve" x="28" y="502" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   3) Select active project</text>
+<text xml:space="preserve" x="28" y="524" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   4) Scenario A: create a new GitHub repo and clone it</text>
+<text xml:space="preserve" x="28" y="546" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   5) Scenario B: clone an existing GitHub repo</text>
+<text xml:space="preserve" x="28" y="568" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   6) Scenario C: publish a local project or repository</text>
+<text xml:space="preserve" x="28" y="590" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   7) Scenario D: diagnose local/remote history (no force)</text>
+<text xml:space="preserve" x="28" y="612" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   8) Commit and push changes</text>
+<text xml:space="preserve" x="28" y="634" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   9) Rename local folder and/or GitHub repository</text>
+<text xml:space="preserve" x="28" y="656" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  10) Check/fix global Git and GitHub settings</text>
+<text xml:space="preserve" x="28" y="678" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  11) Check/add important project files</text>
+<text xml:space="preserve" x="28" y="700" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  12) Help: Git concepts, commands, scenarios, safety</text>
+<text xml:space="preserve" x="28" y="722" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  13) Scan Git history for secrets</text>
+<text xml:space="preserve" x="28" y="744" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  14) Branches: list/create/switch/rename/delete/upstream</text>
+<text xml:space="preserve" x="28" y="766" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  15) Undo/revert: local changes, commits, remote-safe revert</text>
+<text xml:space="preserve" x="28" y="788" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  16) Add Dockerfile and GHCR publishing workflow</text>
+<text xml:space="preserve" x="28" y="810" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  17) Stash: save/list/show/apply/pop/drop</text>
+<text xml:space="preserve" x="28" y="832" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  18) Merge/rebase: guided operations and conflict recovery</text>
+<text xml:space="preserve" x="28" y="854" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  19) Tags/releases: create, sign, push, delete, GitHub release</text>
+<text xml:space="preserve" x="28" y="876" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  20) Repository inspector: status/diffs/log/file history</text>
+<text xml:space="preserve" x="28" y="898" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   0) Exit</text>
+<text xml:space="preserve" x="28" y="920" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="942" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Choose an option [0]: </text>
+</svg>

@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1102" viewBox="0 0 1100 1102" role="img" aria-labelledby="title desc">
+<title id="title">git-create check  ·  demo-project</title>
+<desc id="desc">Terminal screenshot of the git-create menu-driven Git assistant.</desc>
+<rect width="100%" height="100%" fill="#010409"/>
+<rect x="1" y="1" width="1098" height="1100" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<rect x="1" y="1" width="1098" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
+<rect x="1" y="40" width="1098" height="15" fill="#161b22" stroke="#161b22"/>
+<circle cx="30" cy="28" r="6" fill="#ff5f56"/>
+<circle cx="50" cy="28" r="6" fill="#ffbd2e"/>
+<circle cx="70" cy="28" r="6" fill="#27c93f"/>
+<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create check  ·  demo-project</text>
+<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Verification: demo-project</text>
+<text xml:space="preserve" x="28" y="106" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="128" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Global tools</text>
+<text xml:space="preserve" x="28" y="150" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> git - git version 2.53.0</text>
+<text xml:space="preserve" x="28" y="172" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> GitHub CLI (gh) - gh version 2.46.0</text>
+<text xml:space="preserve" x="28" y="194" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> ssh-keygen - available</text>
+<text xml:space="preserve" x="28" y="216" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="238" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Global identity</text>
+<text xml:space="preserve" x="28" y="260" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> user.name - Roger Bergling</text>
+<text xml:space="preserve" x="28" y="282" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> user.email - github@bergling.net</text>
+<text xml:space="preserve" x="28" y="304" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="326" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Global SSH signing</text>
+<text xml:space="preserve" x="28" y="348" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> gpg.format - ssh</text>
+<text xml:space="preserve" x="28" y="370" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> user.signingkey - ~/.ssh/disk_bergling.pub</text>
+<text xml:space="preserve" x="28" y="392" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> commit.gpgsign - true</text>
+<text xml:space="preserve" x="28" y="414" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> gpg.ssh.allowedSignersFile - configured (signing key present)</text>
+<text xml:space="preserve" x="28" y="436" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="458" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Repository</text>
+<text xml:space="preserve" x="28" y="480" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Path - ~/Projects/demo-project</text>
+<text xml:space="preserve" x="28" y="502" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Branch - main</text>
+<text xml:space="preserve" x="28" y="524" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Working tree - clean</text>
+<text xml:space="preserve" x="28" y="546" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Git operation - none in progress</text>
+<text xml:space="preserve" x="28" y="568" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Remotes - origin = git@github.com:demo-user/demo-project.git</text>
+<text xml:space="preserve" x="28" y="590" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Upstream branch - origin/main</text>
+<text xml:space="preserve" x="28" y="612" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Ahead/behind - in sync with upstream</text>
+<text xml:space="preserve" x="28" y="634" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Remote reachable - origin responded</text>
+<text xml:space="preserve" x="28" y="656" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> HEAD signature - good signature by github@bergling.net</text>
+<text xml:space="preserve" x="28" y="678" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="700" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Important files</text>
+<text xml:space="preserve" x="28" y="722" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> README - README.md</text>
+<text xml:space="preserve" x="28" y="744" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> .gitignore - present</text>
+<text xml:space="preserve" x="28" y="766" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> .dockerignore - present</text>
+<text xml:space="preserve" x="28" y="788" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Dockerfile - present</text>
+<text xml:space="preserve" x="28" y="810" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> GHCR workflow - present</text>
+<text xml:space="preserve" x="28" y="832" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#58a6ff" font-weight="700">[i]</tspan> LICENSE - not found (optional until publishing terms are chosen)</text>
+<text xml:space="preserve" x="28" y="854" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="876" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Safety</text>
+<text xml:space="preserve" x="28" y="898" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Sensitive files tracked - none detected</text>
+<text xml:space="preserve" x="28" y="920" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Secret content scan (tracked) - no common secret patterns found</text>
+<text xml:space="preserve" x="28" y="942" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> Secret content scan (untracked) - no common secret patterns found</text>
+<text xml:space="preserve" x="28" y="964" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> index.lock - none</text>
+<text xml:space="preserve" x="28" y="986" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="1008" fill="#3fb950" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Summary: 44 passed, 0 warning(s), 0 failure(s)</text>
+<text xml:space="preserve" x="28" y="1030" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="1052" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Choose an option [0]: </text>
+</svg>
