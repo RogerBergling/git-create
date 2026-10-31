@@ -2014,6 +2014,24 @@ def gitignore_missing(root: Path) -> List[str]:
     return missing
 
 
+DOCKERIGNORE_REQUIRED = [
+    (".git/config", ".git"),
+    (".env", ".env"),
+    ("node_modules/x", "node_modules"),
+    (".venv/x", ".venv"),
+    ("secret.pem", "*.pem"),
+    ("secret.key", "*.key"),
+]
+
+
+def dockerignore_missing(root: Path) -> List[str]:
+    path = root / ".dockerignore"
+    if not path.exists():
+        return [pattern for _, pattern in DOCKERIGNORE_REQUIRED]
+    text = read_text(path)
+    return [pattern for candidate, pattern in DOCKERIGNORE_REQUIRED if not dockerignore_covers(text, candidate)]
+
+
 def dockerignore_covers(text: str, candidate: str) -> bool:
     matched = False
     for raw in text.splitlines():
@@ -2904,29 +2922,34 @@ def write_new_file(path: Path, content: str, label: str) -> bool:
     return True
 
 
-def ensure_gitignore(root: Path, ask_first: bool = True) -> bool:
+def missing_ignore_rules(root: Path) -> List[str]:
+    additions: List[str] = []
+    if (root / ".gitignore").exists():
+        additions.extend(gitignore_missing(root))
+    for line in SECRET_APPEND_LINES:
+        if not is_ignored(root, SECRET_TEST_PATH[line]) and line not in additions:
+            additions.append(line)
+    if is_ignored(root, ".env.example") and "!.env.example" not in additions:
+        additions.append("!.env.example")
+    return additions
+
+
+def ensure_gitignore(root: Path, ask_first: bool = True, confirm_changes: bool = True) -> bool:
     path = root / ".gitignore"
     if not path.exists():
         if ask_first and not confirm("Create a new .gitignore with secret/build rules?", True):
             return False
         return write_new_file(path, GITIGNORE_TEMPLATE, ".gitignore")
-
-    # Check the example path even when it does not exist yet. A broad .env.*
-    # rule would otherwise hide a future .env.example.
-    example_ignored = is_ignored(root, ".env.example")
-    additions = [
-        line
-        for line in SECRET_APPEND_LINES
-        if not is_ignored(root, SECRET_TEST_PATH[line])
-    ]
-    if example_ignored or ".env.*" in additions:
-        if "!.env.example" not in additions:
-            additions.append("!.env.example")
-    if not additions:
-        success(".gitignore already covers the important secret patterns.")
+    if path.is_symlink():
+        failure(f"Refusing to modify a symlinked .gitignore: {path}")
         return False
-    print("Missing secret rules: " + ", ".join(additions))
-    if not confirm("Append these rules to .gitignore?", True):
+
+    additions = missing_ignore_rules(root)
+    if not additions:
+        success(".gitignore already covers the important ignore patterns.")
+        return False
+    print("Missing ignore rules: " + ", ".join(additions))
+    if confirm_changes and not confirm("Append these rules to .gitignore?", True):
         return False
     try:
         existing = path.read_text(encoding="utf-8", errors="replace")
@@ -2941,24 +2964,44 @@ def ensure_gitignore(root: Path, ask_first: bool = True) -> bool:
     return True
 
 
-def ensure_dockerignore(root: Path, ask_first: bool = True) -> bool:
+def ensure_dockerignore(root: Path, ask_first: bool = True, confirm_changes: bool = True) -> bool:
     path = root / ".dockerignore"
-    if path.exists():
-        info(f".dockerignore already exists: {path}")
+    if not path.exists():
+        if ask_first and not confirm("Create a .dockerignore template?", True):
+            return False
+        return write_new_file(path, DOCKERIGNORE_TEMPLATE, ".dockerignore")
+    if path.is_symlink():
+        failure(f"Refusing to modify a symlinked .dockerignore: {path}")
         return False
-    if ask_first and not confirm("Create a .dockerignore template?", True):
+    missing = dockerignore_missing(root)
+    if not missing:
+        info(f".dockerignore already covers the important patterns: {path}")
         return False
-    return write_new_file(path, DOCKERIGNORE_TEMPLATE, ".dockerignore")
+    print("Missing .dockerignore rules: " + ", ".join(missing))
+    if confirm_changes and not confirm("Append these rules to .dockerignore?", True):
+        return False
+    try:
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        prefix = "" if not existing or existing.endswith("\n") else "\n"
+        block = prefix + "\n# git-create: Docker context safety patterns\n" + "\n".join(missing) + "\n"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(block)
+    except OSError as exc:
+        failure(f"could not update .dockerignore: {exc}")
+        return False
+    success(f"updated {path}")
+    return True
 
 
-def ensure_readme(root: Path, ask_first: bool = True) -> bool:
+def ensure_readme(root: Path, ask_first: bool = True, description: Optional[str] = None) -> bool:
     existing = find_readme(root)
     if existing:
         info(f"README already exists: {existing}")
         return False
     if ask_first and not confirm("Create a minimal README.md?", True):
         return False
-    description = ask("Short project description (optional)", allow_empty=True)
+    if description is None:
+        description = ask("Short project description (optional)", allow_empty=True)
     content = README_TEMPLATE.format(
         name=root.name,
         description=description or "A short description of the project.",
@@ -3078,13 +3121,13 @@ def ensure_license(root: Path, ask_first: bool = True) -> bool:
     return write_new_file(root / "LICENSE", content, "LICENSE")
 
 
-def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
+def ensure_env_example(root: Path, ask_first: bool = True, confirm_changes: bool = True) -> bool:
     target = root / ".env.example"
     source = root / ".env"
     if target.exists():
         if is_ignored(root, ".env.example"):
             warning(".env.example exists but is ignored; repairing .gitignore.")
-            ensure_gitignore(root)
+            ensure_gitignore(root, ask_first=False, confirm_changes=confirm_changes)
         info(f".env.example already exists: {target}")
         return False
     if not source.exists():
@@ -3092,7 +3135,7 @@ def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
         return False
     if not is_ignored(root, ".env"):
         warning(".env is not ignored; repairing .gitignore before creating .env.example.")
-        ensure_gitignore(root)
+        ensure_gitignore(root, ask_first=False, confirm_changes=confirm_changes)
         if not is_ignored(root, ".env"):
             failure(".env is still not ignored. Add .env to .gitignore manually, then try again.")
             return False
@@ -3107,15 +3150,15 @@ def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
         return False
     if not keys:
         warning("No variable names found in .env.")
-        if not confirm("Create a header-only .env.example?", True):
+        if confirm_changes and not confirm("Create a header-only .env.example?", True):
             return False
     if is_ignored(root, ".env.example"):
         warning("The current .gitignore would hide .env.example; adding an explicit exception.")
-        ensure_gitignore(root)
+        ensure_gitignore(root, ask_first=False, confirm_changes=confirm_changes)
         if is_ignored(root, ".env.example"):
             failure(".env.example is still ignored. Add '!.env.example' after the .env.* rule, then retry.")
             return False
-    if ask_first and not confirm(f"Create .env.example with {len(keys)} blank key(s)?", True):
+    if ask_first and confirm_changes and not confirm(f"Create .env.example with {len(keys)} blank key(s)?", True):
         return False
     lines = [
         "# Generated by git-create from .env.",
@@ -3141,6 +3184,58 @@ def print_file_checklist(root: Path) -> None:
     ]
     for label, value in checks:
         print(f"  {label:16} {value}")
+
+
+def safe_file_fix_plan(root: Path) -> List[str]:
+    """List additive file fixes that can be applied without destroying data."""
+    actions: List[str] = []
+    if not (root / ".gitignore").exists():
+        actions.append(".gitignore")
+    elif missing_ignore_rules(root):
+        actions.append(".gitignore rules")
+    if not (root / ".dockerignore").exists():
+        actions.append(".dockerignore")
+    elif dockerignore_missing(root):
+        actions.append(".dockerignore rules")
+    if find_readme(root) is None:
+        actions.append("README.md")
+    if not (root / ".editorconfig").exists():
+        actions.append(".editorconfig")
+    if not (root / ".gitattributes").exists():
+        actions.append(".gitattributes")
+    if (root / ".env").exists() and not (root / ".env.example").exists():
+        actions.append(".env.example")
+    return actions
+
+
+def apply_safe_file_fixes(root: Path) -> List[str]:
+    """Apply only additive project-file fixes and return the changed labels."""
+    changed: List[str] = []
+    if not (root / ".gitignore").exists():
+        if ensure_gitignore(root, ask_first=False, confirm_changes=False):
+            changed.append(".gitignore")
+    elif missing_ignore_rules(root):
+        if ensure_gitignore(root, ask_first=False, confirm_changes=False):
+            changed.append(".gitignore")
+    if not (root / ".dockerignore").exists():
+        if ensure_dockerignore(root, ask_first=False):
+            changed.append(".dockerignore")
+    elif dockerignore_missing(root):
+        if ensure_dockerignore(root, ask_first=False, confirm_changes=False):
+            changed.append(".dockerignore")
+    if find_readme(root) is None:
+        if ensure_readme(root, ask_first=False, description="A short description of the project."):
+            changed.append("README.md")
+    if not (root / ".editorconfig").exists():
+        if ensure_editorconfig(root, ask_first=False):
+            changed.append(".editorconfig")
+    if not (root / ".gitattributes").exists():
+        if ensure_gitattributes(root, ask_first=False):
+            changed.append(".gitattributes")
+    if (root / ".env").exists() and not (root / ".env.example").exists():
+        if ensure_env_example(root, ask_first=False, confirm_changes=False):
+            changed.append(".env.example")
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -3504,8 +3599,11 @@ class App:
                    without executing them.
 
                 Scan (option 2)
-                   After scanning, 'a' runs local verification on every repository
-                   found and prints a batch summary.
+                   After scanning, 'a' verifies all repositories, 'f' applies safe
+                   missing-file fixes, 'p' fast-forward pulls clean repositories,
+                   and 'u' pushes repositories that are ahead and not diverged.
+                   Batch pull/push skip dirty, detached, upstream-less, or
+                   in-progress repositories and never force.
                 """
             )
         )
@@ -3625,13 +3723,24 @@ class App:
         if not repos:
             return
         choice = ask(
-            "Number to activate, 'a' to verify all locally, or Enter to return",
+            "Number to activate, 'a' verify all, 'f' fix safe files, 'p' pull all, "
+            "'u' push all, or Enter to return",
             allow_empty=True,
         )
         if not choice:
             return
-        if choice.strip().lower() in ("a", "all"):
+        action = choice.strip().lower()
+        if action in ("a", "all"):
             self.batch_verify_repos(repos)
+            return
+        if action in ("f", "fix"):
+            self.batch_fix_repos(repos)
+            return
+        if action in ("p", "pull"):
+            self.batch_pull_repos(repos)
+            return
+        if action in ("u", "push"):
+            self.batch_push_repos(repos)
             return
         try:
             index = int(choice)
@@ -3712,6 +3821,251 @@ class App:
             success("No blocking local issues found across the scanned repositories.")
         else:
             warning("Review failures before making commits or pushing any repository.")
+
+    def batch_fix_repos(self, repos: Sequence[Dict[str, object]]) -> None:
+        if not repos:
+            info("No repositories to fix.")
+            return
+        heading("Batch safe file fixes")
+        explain(
+            "Creates missing project-hygiene files and appends missing ignore rules across "
+            "the scanned repositories.",
+            "These are the safe, additive fixes that clear the common file and ignore-rule "
+            "warnings without touching history, remotes, or tracked secrets.",
+            "Existing files are never overwritten. Licenses, remotes, commits, and history "
+            "changes are not automated by this batch action.",
+        )
+        plan: List[Tuple[Dict[str, object], Path, List[str]]] = []
+        skipped: List[Tuple[str, str]] = []
+        for repo in repos:
+            root = Path(str(repo["path"]))
+            name = str(repo.get("name") or root.name)
+            if in_progress_operations(root):
+                skipped.append((name, "Git operation in progress"))
+                continue
+            fixes = safe_file_fix_plan(root)
+            if fixes:
+                plan.append((repo, root, fixes))
+        if skipped:
+            print(col("Skipped:", "bold"))
+            for name, reason in skipped:
+                print(f"  - {name}: {reason}")
+            print()
+        if not plan:
+            success("No safe automatic file fixes are needed.")
+            info("Remaining warnings may require decisions about licenses, remotes, secrets, signing, or history.")
+            info("Use 'a' to verify all and see the remaining checks.")
+            return
+        for repo, root, fixes in plan:
+            name = str(repo.get("name") or root.name)
+            print(f"  {col(name, 'bold')}: " + ", ".join(fixes))
+        print()
+        info("Only missing files are created; an existing .gitignore may receive missing rules.")
+        info("Licenses, Dockerfiles, remotes, tracked secrets, and history are left alone.")
+        if self.dry_run:
+            warning(f"DRY RUN: would apply safe file fixes to {len(plan)} repositories.")
+            return
+        if not confirm(f"Apply these safe fixes to {len(plan)} repositories?", False):
+            return
+        changed_repos = 0
+        for repo, root, _fixes in plan:
+            name = str(repo.get("name") or root.name)
+            changed = apply_safe_file_fixes(root)
+            if changed:
+                changed_repos += 1
+                success(f"{name}: " + ", ".join(changed))
+            else:
+                info(f"{name}: no changes were needed.")
+        if changed_repos:
+            info("Review and commit the new files in each repository; batch fix does not commit.")
+            info("Use 'a' to verify all again and see any warnings that still need manual action.")
+        else:
+            warning("No files were changed.")
+
+    def batch_pull_repos(self, repos: Sequence[Dict[str, object]]) -> None:
+        if not repos:
+            info("No repositories to pull.")
+            return
+        heading("Batch pull (fast-forward only)")
+        explain(
+            "Runs git pull --ff-only --no-rebase for each clean repository with an upstream.",
+            "Fast-forward pulls receive remote commits without merging or rewriting local history.",
+            "Dirty repositories, detached HEADs, missing upstreams, and in-progress operations "
+            "are skipped. No force and no automatic merge/rebase is used.",
+        )
+        ready: List[Tuple[Dict[str, object], Path, str, str]] = []
+        skipped: List[Tuple[str, str]] = []
+        for repo in repos:
+            root = Path(str(repo["path"]))
+            name = str(repo.get("name") or root.name)
+            branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+            if not branch:
+                skipped.append((name, "detached HEAD"))
+                continue
+            if in_progress_operations(root):
+                skipped.append((name, "Git operation in progress"))
+                continue
+            if status_entries(root):
+                skipped.append((name, "dirty working tree"))
+                continue
+            upstream = git_out(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+            if not upstream:
+                skipped.append((name, "no upstream"))
+                continue
+            remote_name = upstream.split("/", 1)[0]
+            if remote_name not in remote_urls(root):
+                skipped.append((name, "upstream remote missing"))
+                continue
+            ready.append((repo, root, branch, upstream))
+        if skipped:
+            print(col("Skipped:", "bold"))
+            for name, reason in skipped:
+                print(f"  - {name}: {reason}")
+            print()
+        if not ready:
+            warning("No repositories are ready for a fast-forward pull.")
+            return
+        for repo, root, branch, upstream in ready:
+            name = str(repo.get("name") or root.name)
+            print(f"  {col(name, 'bold')}: {branch} <- {upstream}")
+        print()
+        if self.dry_run:
+            warning(f"DRY RUN: would fast-forward pull {len(ready)} repositories.")
+            for _repo, root, _branch, _upstream in ready:
+                print(f"  {root}: " + col(shlex.join(["git", "pull", "--ff-only", "--no-rebase"]), "dim"))
+            return
+        if not confirm(f"Fast-forward pull {len(ready)} repositories?", False):
+            return
+        succeeded = failed = 0
+        for repo, root, branch, upstream in ready:
+            name = str(repo.get("name") or root.name)
+            print()
+            print(col(f"{name}: pulling {branch} <- {upstream}", "bold"))
+            result = run_cmd(
+                ["git", "pull", "--ff-only", "--no-rebase"],
+                cwd=root,
+                timeout=120,
+                env_extra=remote_env(),
+            )
+            if result.combined:
+                print(result.combined)
+            if result.returncode == 0:
+                succeeded += 1
+                success(f"{name}: fast-forward pull complete.")
+            else:
+                failed += 1
+                failure(f"{name}: pull failed; no force was used.")
+                info("If histories diverged, use option 7 (scenario D) for that repository.")
+        print()
+        print(f"Batch pull summary: {succeeded} succeeded, {failed} failed, {len(skipped)} skipped.")
+
+    def batch_push_repos(self, repos: Sequence[Dict[str, object]]) -> None:
+        if not repos:
+            info("No repositories to push.")
+            return
+        heading("Batch push (normal, no force)")
+        explain(
+            "Fetches each repository, then pushes the current branch normally when it has an "
+            "upstream and local commits to send.",
+            "Batch push is convenient for many independent projects, but it still contacts each "
+            "remote and can publish commits under your account.",
+            "No force is used. Repositories with no upstream, a missing upstream remote, "
+            "detached HEAD, an in-progress operation, or a diverged history are skipped.",
+        )
+        ready: List[Tuple[Dict[str, object], Path, str, str, int, bool]] = []
+        skipped: List[Tuple[str, str]] = []
+        for repo in repos:
+            root = Path(str(repo["path"]))
+            name = str(repo.get("name") or root.name)
+            branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+            if not branch:
+                skipped.append((name, "detached HEAD"))
+                continue
+            if in_progress_operations(root):
+                skipped.append((name, "Git operation in progress"))
+                continue
+            upstream = git_out(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+            if not upstream:
+                skipped.append((name, "no upstream"))
+                continue
+            remote_name, _, remote_branch = upstream.partition("/")
+            if not remote_name or not remote_branch:
+                skipped.append((name, "malformed upstream"))
+                continue
+            if remote_name not in remote_urls(root):
+                skipped.append((name, "upstream remote missing"))
+                continue
+            if remote_branch != branch:
+                skipped.append((name, f"upstream branch name differs ({upstream})"))
+                continue
+            if not self.dry_run:
+                fetch = run_cmd(
+                    ["git", "fetch", "--prune", remote_name],
+                    cwd=root,
+                    timeout=120,
+                    env_extra=remote_env(),
+                )
+                if fetch.returncode != 0:
+                    skipped.append((name, "fetch failed"))
+                    continue
+            state = quick_repo_info(root)
+            if state is None:
+                skipped.append((name, "could not read repository state"))
+                continue
+            ahead = int(state.get("ahead") or 0)
+            behind = int(state.get("behind") or 0)
+            if behind:
+                skipped.append((name, f"diverged ({ahead} ahead, {behind} behind)"))
+                continue
+            if ahead == 0:
+                skipped.append((name, "nothing to push"))
+                continue
+            ready.append((repo, root, branch, upstream, ahead, bool(state.get("dirty"))))
+        if skipped:
+            print(col("Skipped:", "bold"))
+            for name, reason in skipped:
+                print(f"  - {name}: {reason}")
+            print()
+        if not ready:
+            warning("No repositories have commits ready to push.")
+            return
+        for repo, root, branch, upstream, ahead, dirty in ready:
+            name = str(repo.get("name") or root.name)
+            suffix = " (dirty working tree; uncommitted changes are not pushed)" if dirty else ""
+            print(f"  {col(name, 'bold')}: {branch} -> {upstream}, {ahead} commit(s) ahead{suffix}")
+        print()
+        if self.dry_run:
+            warning(f"DRY RUN: would push {len(ready)} repositories.")
+            for _repo, root, branch, upstream, ahead, _dirty in ready:
+                remote_name, remote_branch = upstream.split("/", 1)
+                command = ["git", "push", remote_name, f"{branch}:{remote_branch}"]
+                print(f"  {root}: {ahead} commit(s) ahead; " + col(shlex.join(command), "dim"))
+            return
+        phrase = "PUSH ALL"
+        typed = ask(f'Type "{phrase}" to push {len(ready)} repositories', allow_empty=True)
+        if typed != phrase:
+            info("Batch push cancelled.")
+            return
+        succeeded = failed = 0
+        for repo, root, branch, upstream, ahead, dirty in ready:
+            name = str(repo.get("name") or root.name)
+            print()
+            dirty_note = "; dirty working tree" if dirty else ""
+            print(col(f"{name}: pushing {branch} -> {upstream} ({ahead} ahead{dirty_note})", "bold"))
+            remote_name, remote_branch = upstream.split("/", 1)
+            command = ["git", "push", remote_name, f"{branch}:{remote_branch}"]
+            result = run_cmd(command, cwd=root, timeout=300, env_extra=remote_env())
+            if result.combined:
+                print(result.combined)
+            if result.returncode == 0:
+                succeeded += 1
+                success(f"{name}: push complete.")
+            else:
+                failed += 1
+                failure(f"{name}: push failed; no force was used.")
+                info("Fetch and compare with option 7 (scenario D) if the remote moved.")
+        print()
+        print(f"Batch push summary: {succeeded} succeeded, {failed} failed, {len(skipped)} skipped.")
 
     def revert_action(self) -> None:
         path = self.require_project()

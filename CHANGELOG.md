@@ -4,6 +4,9 @@ All notable changes to `git-create` are recorded here.
 
 ## Unreleased
 
+- Added batch actions after a folder scan: verify all, apply safe project-file
+  fixes, fast-forward pull, and normal push across eligible repositories.
+- Extended dry-run mode to batch file fixes, batch pull, and batch push.
 - Hardened recovery backups with collision-resistant names and exclusive,
   private file creation that refuses symlinks and overwrites.
 - Added a security policy, contribution guide, CODEOWNERS, issue and pull

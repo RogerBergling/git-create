@@ -154,6 +154,115 @@ class InteractiveTests(unittest.TestCase):
         backups = mod["git_out"](self.repo, "for-each-ref", "--format=%(refname)", "refs/git-create-backups")
         self.assertIn("before-remote-rename-feature", backups)
 
+    def test_scan_dispatches_batch_fix(self) -> None:
+        mod = self.load()
+        app = mod["App"]()
+        app.project = self.repo
+        calls = []
+        app.batch_fix_repos = lambda repos: calls.append(list(repos))
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Maximum depth"):
+                return "3"
+            if prompt.startswith("Number to activate"):
+                return "f"
+            return default if default is not None else ""
+
+        globals_dict = mod["App"].scan_action.__globals__
+        globals_dict["ask_path"] = lambda prompt, default=None: Path(self.temp.name)
+        globals_dict["ask"] = ask
+        globals_dict["print_scan_results"] = lambda *args, **kwargs: None
+        app.scan_action()
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0])
+
+    def test_batch_safe_file_fixes(self) -> None:
+        mod = self.load()
+        app = mod["App"]()
+        app.project = self.repo
+        self.patch_globals(mod["App"].batch_fix_repos, confirm=lambda p, d=False: True)
+        app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
+        for name in (".gitignore", ".dockerignore", ".editorconfig", ".gitattributes"):
+            self.assertTrue((self.repo / name).is_file(), name)
+        self.assertIn("*.pem", (self.repo / ".gitignore").read_text(encoding="utf-8"))
+        self.assertIn(".env", (self.repo / ".dockerignore").read_text(encoding="utf-8"))
+        (self.repo / ".dockerignore").write_text(".git\n", encoding="utf-8")
+        app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
+        repaired = (self.repo / ".dockerignore").read_text(encoding="utf-8")
+        self.assertIn(".git\n", repaired)
+        self.assertIn(".env", repaired)
+
+    def test_batch_dry_run_makes_no_changes(self) -> None:
+        mod = self.load()
+        app = mod["App"](dry_run=True)
+        app.project = self.repo
+        app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
+        self.assertFalse((self.repo / ".gitignore").exists())
+
+    def test_batch_push_dry_run_does_not_push(self) -> None:
+        mod = self.load()
+        remote = self.add_origin()
+        (self.repo / "dry-run-push.txt").write_text("not pushed\n", encoding="utf-8")
+        subprocess.run(["git", "add", "dry-run-push.txt"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-qm", "dry run"],
+            cwd=self.repo,
+            check=True,
+        )
+        app = mod["App"](dry_run=True)
+        app.project = self.repo
+        app.batch_push_repos([{"path": str(self.repo), "name": self.repo.name}])
+        result = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", "main:dry-run-push.txt"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_batch_pull_fast_forward(self) -> None:
+        mod = self.load()
+        remote = self.add_origin()
+        clone = Path(self.temp.name) / "batch-clone"
+        subprocess.run(["git", "clone", "-q", "-b", "main", str(remote), str(clone)], check=True)
+        (clone / "remote-update.txt").write_text("from remote\n", encoding="utf-8")
+        subprocess.run(["git", "add", "remote-update.txt"], cwd=clone, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-qm", "remote update"],
+            cwd=clone,
+            check=True,
+        )
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=clone, check=True)
+        app = mod["App"]()
+        app.project = self.repo
+        self.patch_globals(mod["App"].batch_pull_repos, confirm=lambda p, d=False: True)
+        app.batch_pull_repos([{"path": str(self.repo), "name": self.repo.name}])
+        self.assertTrue((self.repo / "remote-update.txt").is_file())
+
+    def test_batch_push_ahead_commit(self) -> None:
+        mod = self.load()
+        remote = self.add_origin()
+        (self.repo / "local-update.txt").write_text("from local\n", encoding="utf-8")
+        subprocess.run(["git", "add", "local-update.txt"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-qm", "local update"],
+            cwd=self.repo,
+            check=True,
+        )
+        app = mod["App"]()
+        app.project = self.repo
+        self.patch_globals(
+            mod["App"].batch_push_repos,
+            ask=lambda prompt, default=None, allow_empty=False: "PUSH ALL",
+        )
+        app.batch_push_repos([{"path": str(self.repo), "name": self.repo.name}])
+        shown = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", "main:local-update.txt"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertEqual(shown, "from local\n")
+
     def test_dry_run_remote_add_does_not_change_anything(self) -> None:
         mod = self.load()
         remote = Path(self.temp.name) / "dry-run-remote.git"
@@ -224,6 +333,13 @@ class InteractiveTests(unittest.TestCase):
         self.patch_globals(mod["App"].create_tag, ask=ask, confirm=lambda p, d=False: True)
         app.create_tag(self.repo)
         self.assertIn("v1.0.0", mod["tag_names"](self.repo))
+
+    def add_origin(self) -> Path:
+        remote = Path(self.temp.name) / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=self.repo, check=True)
+        subprocess.run(["git", "push", "-q", "-u", "origin", "main"], cwd=self.repo, check=True)
+        return remote
 
     def add_submodule(self) -> None:
         subrepo = Path(self.temp.name) / "subrepo"

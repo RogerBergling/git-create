@@ -32,7 +32,7 @@ Current version: **1.7.0**.
 - [Merge and rebase](#merge-and-rebase)
 - [Tags and releases](#tags-and-releases)
 - [Repository inspector](#repository-inspector)
-- [Batch verification](#batch-verification)
+- [Batch operations](#batch-operations)
 - [GitHub collaboration](#github-collaboration)
 - [Remotes](#remotes)
 - [Worktrees and submodules](#worktrees-and-submodules)
@@ -199,7 +199,8 @@ Typical menu flow:
    to generate a Dockerfile and GHCR publishing workflow.
 8. Use **17** for stashes, **18** for guided merge/rebase, **19** for tags and
    GitHub releases, and **20** to inspect status, diffs, and history.
-9. In option **2**, enter `a` after a scan to verify every repository locally.
+9. In option **2**, enter `a` to verify every repository, `f` to fix safe file
+   issues, `p` to fast-forward pull, or `u` to push all eligible repositories.
 10. Use **21** for pull requests, issues, and reviews, **22** to manage local
     remote names and URLs, **23** for worktrees and submodules, and **24** to
     toggle dry-run mode.
@@ -327,7 +328,7 @@ The command is printed after the explanation, immediately before execution.
 | Option | Function |
 | --- | --- |
 | `1` | Verify the active project: global settings, repository state, secrets, files, remote, signature, and GitHub metadata. |
-| `2` | Scan a folder for Git repositories. Choose the folder and depth, then make one active, verify one, or enter `a` for a local batch verification of all. |
+| `2` | Scan a folder for Git repositories. Choose the folder and depth, then make one active, verify one, or use batch actions: `a` verify all, `f` fix safe files, `p` fast-forward pull, `u` push all eligible repositories. |
 | `3` | Select the active project by path. |
 | `4` | **Scenario A**: create a new private/public GitHub repository with a README and clone it. |
 | `5` | **Scenario B**: clone an existing GitHub repository, or clone any Git URL. |
@@ -491,8 +492,8 @@ The `.gitignore` analysis checks for:
 - Python, Node, build, editor, and log output directories
 
 The file wizard creates templates only when a file is missing. Existing files
-are never overwritten. For an existing `.gitignore`, only missing secret rules
-are appended after confirmation.
+are never overwritten. For existing `.gitignore` and `.dockerignore` files,
+missing safety rules are appended after confirmation.
 
 If an `.env` exists and `.env.example` does not, option 11 reads only the
 **variable names** from `.env` and writes a template with blank values. Values
@@ -767,19 +768,43 @@ Menu option **20** is read-only. It shows:
 - history for a chosen file
 - remotes, branches, tags, and upstream
 
-## Batch verification
+## Batch operations
 
-After a folder scan, enter **`a`** instead of a repository number. The app runs
-its local project checks against every repository found and prints:
+After a folder scan, choose a batch action instead of a repository number:
 
-- per-repository pass/warning/failure counts
-- the first few issues per repository
-- dirty-working-tree counts
-- an aggregate summary
+| Key | Action | What it does |
+| --- | --- | --- |
+| `a` | Verify all | Runs local project checks on every repository and prints a batch summary. |
+| `f` | Fix safe files | Creates missing `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, and `.env.example` where applicable, and appends missing ignore rules. Existing content is never overwritten. |
+| `p` | Pull all | Runs `git pull --ff-only --no-rebase` only for clean repositories with an upstream. Dirty, detached, upstream-less, and in-progress repositories are skipped. |
+| `u` | Push all | Fetches each repository, then pushes the current branch normally when it has an upstream, local commits, and no divergence. Requires typing `PUSH ALL`. |
 
 Batch verification includes tracked and untracked secret scanning, but it is
 local-only: it does not fetch, contact GitHub, or run `git fsck`. Run option 1
 on an individual repository for deep verification.
+
+Batch fix is deliberately limited to additive file hygiene. It does not choose
+a license, rewrite history, remove tracked secrets, add remotes, commit, or
+push. Batch pull never merges or rebases; batch push never forces.
+
+Both batch pull and batch push skip repositories with:
+
+- a detached `HEAD`
+- an in-progress merge, rebase, cherry-pick, revert, or bisect
+- no upstream branch
+- a missing upstream remote or an upstream branch with a different name (push)
+- a dirty working tree (pull)
+- diverged local and remote histories (push)
+- failed fetch (push)
+
+Global Git/GitHub settings issues still apply to every repository and are not
+changed by batch fix; use option **10** to repair them once.
+
+Not every warning is safely automatable. License choice, tracked secrets,
+missing remotes, signing setup, history problems, and diverged branches require
+a decision or a repository-specific action. Batch fix reports the safe subset
+and leaves those items for review with `a` (verify all) and the individual
+repository menus.
 
 ## GitHub collaboration
 
@@ -855,9 +880,12 @@ In dry-run mode the app shows the exact command and skips execution for:
 - submodule update/sync/add/deinit/remove
 - remote add/change/rename/remove/prune
 - safety-backup cleanup
+- batch safe file fixes
+- batch fast-forward pull
+- batch normal push
 
 Read-only lists and checks still run normally. Dry-run mode does not affect
-branch, tag, stash, commit, push, or GitHub write actions.
+single-repository branch, tag, stash, commit, push, or GitHub write actions.
 
 ## Docker image and GHCR workflow
 
@@ -1326,7 +1354,7 @@ pinned to commit SHAs. Dependabot keeps actions and development tools current,
 and CodeQL scans the runtime weekly and on pull requests. The suite includes
 black-box CLI tests and interactive-flow tests for worktrees, submodules,
 remotes, tags, branch protection, Actions secrets, audit output, dry-run
-behavior, version consistency, and backup safety.
+behavior, batch file fixes/sync, version consistency, and backup safety.
 
 The current coverage is integration-heavy and does not yet meet a typical
 enterprise gate; coverage and type-check ratchets are tracked in the enterprise
