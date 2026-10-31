@@ -6,7 +6,9 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.5.0**.
+Current version: **1.7.0**.
+
+[![CI](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml/badge.svg)](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml)
 
 ## Contents
 
@@ -33,6 +35,8 @@ Current version: **1.5.0**.
 - [Batch verification](#batch-verification)
 - [GitHub collaboration](#github-collaboration)
 - [Remotes](#remotes)
+- [Worktrees and submodules](#worktrees-and-submodules)
+- [Dry-run mode](#dry-run-mode)
 - [Docker image and GHCR workflow](#docker-image-and-ghcr-workflow)
 - [Command line mode](#command-line-mode)
 - [Safety model](#safety-model)
@@ -42,6 +46,8 @@ Current version: **1.5.0**.
 - [Updating and uninstalling](#updating-and-uninstalling)
 - [Troubleshooting](#troubleshooting)
 - [Development and validation](#development-and-validation)
+- [Automated tests and CI](#automated-tests-and-ci)
+- [Changelog](#changelog)
 - [Repository layout](#repository-layout)
 
 The app is deliberately conservative:
@@ -190,8 +196,9 @@ Typical menu flow:
 8. Use **17** for stashes, **18** for guided merge/rebase, **19** for tags and
    GitHub releases, and **20** to inspect status, diffs, and history.
 9. In option **2**, enter `a` after a scan to verify every repository locally.
-10. Use **21** for pull requests, issues, and reviews, and **22** to manage
-    local remote names and URLs.
+10. Use **21** for pull requests, issues, and reviews, **22** to manage local
+    remote names and URLs, **23** for worktrees and submodules, and **24** to
+    toggle dry-run mode.
 
 The app never changes your global Git configuration or project files without
 showing a plan and asking for confirmation. The settings wizard, file templates,
@@ -263,7 +270,11 @@ explains the commands you will see.
 | `git merge` | Combines another branch into the current branch. | Preserves shared history while integrating work. |
 | `git rebase` | Replays local commits on a new base. | Produces linear history only when those commits are not shared. |
 | `git tag` | Creates, verifies, pushes, or deletes stable names for commits. | Marks releases and checkpoints without changing history. |
+| `git worktree` | Creates, lists, prunes, or removes linked checkouts. | Works on multiple branches without a second clone. |
+| `git submodule` | Lists, initializes, updates, syncs, adds, or deinitializes submodules. | Manages repositories embedded at pinned commits. |
+| `gh auth switch` | Changes the active authenticated GitHub account. | Supports multiple identities without logging in again. |
 | `gh release create` | Creates a GitHub release attached to a tag. | Adds release notes and download metadata to a version tag. |
+| `gh run watch` | Follows a GitHub Actions run until completion. | Confirms whether the GHCR publishing workflow succeeded. |
 | `gh release upload` | Uploads a file to an existing release. | Distributes binaries or archives without changing Git history. |
 | `gh pr` / `gh issue` | Lists, views, or creates pull requests and issues; submits reviews. | Supports GitHub collaboration without merging or closing anything. |
 | `git remote -v` | Lists remote names and URLs. | Confirms where fetch and push will go. |
@@ -285,8 +296,9 @@ explains the commands you will see.
   and safety rules in the terminal.
 - Option **13** explains why history scanning is different from scanning the
   current files, and reports bounded results.
-- Options **14–20** explain branch operations, local vs shared-history revert,
-  stashes, merge/rebase safety, tags/releases, the repository inspector, and
+- Options **14–24** explain branch operations, local vs shared-history revert,
+  stashes, merge/rebase safety, tags/releases, the repository inspector,
+  GitHub collaboration/audit, remotes, worktrees/submodules, dry-run mode, and
   what the generated Docker/GHCR files do.
 - Verification messages include a short reason and, where useful, the command
   that fixes the problem.
@@ -320,18 +332,20 @@ The command is printed after the explanation, immediately before execution.
 | `8` | Commit and push: review changes, stage all or selected paths, scan secrets, sign, commit, and push normally. |
 | `9` | Rename the local folder and/or the GitHub repository, and optionally commit/push pending changes. |
 | `10` | Check/fix global Git/GitHub settings, SSH signing, allowed signers, and `gh` authentication; option 10 inside also edits repository-local identity/signing overrides. |
-| `11` | Check/add important project files: `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, and `.env.example`. |
+| `11` | Check/add important project files: `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, `.env.example`, and MIT/ISC/BSD-3 `LICENSE` templates. |
 | `12` | Help, Git concepts, command explanations, and the scenario guide. |
 | `13` | Scan reachable Git history for common private-key and token patterns. |
-| `14` | Branch management: list, create, switch, rename, delete local/remote branches, set upstream, show branch graph. |
+| `14` | Branch management: list, create, switch, rename, delete local/remote branches, rename an origin branch, set upstream, show branch graph. |
 | `15` | Undo/revert helpers: unstage, discard local edits with a backup patch, safe revert commits, soft-undo unpublished commits, amend an unpublished commit. |
 | `16` | Create a starter Dockerfile, `.dockerignore`, and a GitHub Actions workflow that publishes to GHCR. |
 | `17` | Stash helpers: save, list, show, apply, pop, and drop local stashes. |
-| `18` | Guided merge/rebase with safety refs, conflict continue/abort, and no force-push. |
+| `18` | Guided merge/rebase with safety refs, interactive conflict resolution, continue/abort, and no force-push. |
 | `19` | Tags/releases: annotated or signed tags, push/delete, and GitHub releases. |
 | `20` | Read-only repository inspector: status, staged/unstaged diffs, log, commit details, file history, remotes, branches, and tags. |
-| `21` | GitHub collaboration: list/view/create pull requests and issues, and submit PR reviews. |
+| `21` | GitHub collaboration: pull requests, issues, reviews, security/CI audit, branch protection, and repository Actions secrets. |
 | `22` | Remotes: list, add, edit URL, rename, remove, and fetch with prune. |
+| `23` | Worktrees and submodules: list/add/remove/prune worktrees; list/update/sync/add/deinitialize/remove submodules. |
+| `24` | Toggle dry-run mode for worktree, submodule, remote, and backup-cleanup changes. |
 | `0` | Exit. |
 
 The defaults point at `~/Projects` when it exists. All paths are prompted, so
@@ -425,6 +439,9 @@ Reading the registered keys uses:
 gh api user/ssh_signing_keys
 ```
 
+The authentication menu can also switch the active `gh` account with
+`gh auth switch --hostname github.com`.
+
 ### Repository-local overrides
 
 In the settings menu, option **10** edits overrides stored in `.git/config`:
@@ -433,10 +450,16 @@ In the settings menu, option **10** edits overrides stored in `.git/config`:
 - local `user.signingkey`
 - local `gpg.format=ssh`
 - local `commit.gpgsign=true/false`
+- a repository-local pre-commit command stored as `gitcreate.precommit`
 - removal of any of those local overrides
 
 Local settings affect only the active repository. The global settings wizard is
-not changed by local edits.
+not changed by local edits. The pre-commit command runs with `sh -c` in the
+repository root immediately before a commit and cancels the commit on failure.
+
+The local-config menu can also install or remove a managed
+`.git/hooks/pre-commit` script so the configured command runs for commits made
+outside this app. An existing unrelated hook is never overwritten.
 
 ## Project files checked
 
@@ -445,7 +468,7 @@ not changed by local edits.
 | `README.md` | Warning when missing. |
 | `.gitignore` | Failure when missing; checks secret and build rules. |
 | `.dockerignore` | Warning when missing; extra context is shown if no Dockerfile is detected yet. |
-| `LICENSE` | Informational; not generated automatically because the license is your choice. |
+| `LICENSE` | Informational; the file wizard can generate MIT, ISC, or BSD-3 after you choose. |
 | `.env.example` | Required when `.env` exists; can be generated with blank values. |
 | `.editorconfig` | Optional; template available. |
 | `.gitattributes` | Informational; template available for line endings and binary markers. |
@@ -470,6 +493,9 @@ are appended after confirmation.
 If an `.env` exists and `.env.example` does not, option 11 reads only the
 **variable names** from `.env` and writes a template with blank values. Values
 are never copied.
+
+Option 11 can also generate a `LICENSE` after you choose MIT, ISC, or BSD-3 and
+provide the copyright holder and year. No license is selected automatically.
 
 ## Scenarios
 
@@ -578,9 +604,10 @@ Menu option **8**:
 4. Scans staged filenames and content for private keys and common token
    patterns.
 5. Shows `git diff --cached --stat` and a bounded full staged diff for review.
-6. Commits with your message, using SSH signing if configured.
-7. Pushes normally and sets upstream on the first push if needed.
-8. On a rejected push, stops and points to scenario D. It never force-pushes.
+6. Runs the optional local `gitcreate.precommit` command and stops on failure.
+7. Commits with your message, using SSH signing if configured.
+8. Pushes normally and sets upstream on the first push if needed.
+9. On a rejected push, stops and points to scenario D. It never force-pushes.
 
 ### History secret scan
 
@@ -618,6 +645,8 @@ Menu option **14** provides:
   before force-deleting an unmerged branch
 - delete an `origin` remote branch, with a typed confirmation and refusal to
   delete the remote default branch
+- rename an `origin` branch by pushing a new name and then deleting the old one
+  with a typed confirmation
 - set or repair the upstream branch
 - show a decorated branch graph
 
@@ -626,9 +655,11 @@ refused while a merge/rebase/cherry-pick/revert is in progress. Git itself
 refuses a switch that would overwrite conflicting local changes; the app never
 discards them automatically.
 
-Renaming a branch is **local only**. The remote branch is not renamed. The app
-keeps a safety ref under `refs/git-create-backups/` before rename/delete
-operations so commits stay reachable locally. Inspect them with
+Renaming a local branch is **local only**. To rename an `origin` branch, use
+the separate remote-branch rename action; it pushes the new name, then deletes
+the old name only after a typed confirmation. The app keeps a safety ref under
+`refs/git-create-backups/` before rename/delete operations so commits stay
+reachable locally. Inspect them with
 `git for-each-ref refs/git-create-backups`; delete them with
 `git update-ref -d <ref>` once you no longer need the backup.
 
@@ -658,6 +689,10 @@ commit is unpublished. If `git revert` conflicts, Git leaves the operation in
 progress. Resolve the conflict and run `git revert --continue`, or abort
 deliberately. The app does not auto-resolve conflicts.
 
+Option **15 → 7** lists and cleans accumulated safety patches and
+`refs/git-create-backups/`. Cleanup requires a typed confirmation and can make
+old unreachable objects eligible for garbage collection.
+
 ## Stash helpers
 
 Menu option **17** manages the local stash stack:
@@ -680,6 +715,8 @@ Menu option **18** provides:
 - rebase the current branch onto another local or remote branch
 - continue an in-progress merge or rebase
 - abort an in-progress merge or rebase
+- resolve conflict files interactively: open in `core.editor`, keep ours/theirs,
+  or mark a manually edited file resolved
 - show the branch graph
 
 Both operations require a clean working tree and create a safety ref first.
@@ -690,6 +727,10 @@ history would require a force push. Rebase is also refused for ranges larger
 than 200 commits, where the safety check would be expensive. Conflicts are
 continued or aborted explicitly; the app never auto-resolves them and never
 force-pushes.
+
+During a rebase, Git's `--ours` is the upstream side being rebased onto and
+`--theirs` is the commit being replayed. The conflict menu labels both choices
+with the Git flag and confirms each file before staging it.
 
 ## Tags and releases
 
@@ -745,11 +786,21 @@ Menu option **21** uses authenticated `gh` commands for:
 - listing and viewing issues
 - creating issues
 - submitting PR reviews: approve, comment, or request changes
+- a read-only security/CI audit: branch protection status, Actions secret
+  **names** (never values), recent workflow runs, and GHCR workflow runs
+- optional failed-log output (`gh run view --log-failed`) for the latest GHCR
+  run
+- optional `gh run watch` for the latest GHCR workflow run
+- branch protection management: view, enable basic protection, or remove it
+  by typing `DISABLE PROTECTION`
+- repository Actions secret management: list names, set/replace a secret via a
+  non-echoed prompt, or delete it by typing `DELETE SECRET <NAME>`
 
-Reads are safe. Creating a PR, issue, or review publishes an action under your
-GitHub account and requires confirmation. The menu does not merge, close,
-delete, or dismiss anything. It requires a GitHub `origin` and authenticated
-`gh`.
+Reads are safe. Creating a PR, issue, review, protection rule, or secret
+publishes an action under your GitHub account and requires confirmation. Secret
+values are read without echo and passed on stdin; they are never printed.
+Admin-scope failures are reported, not bypassed. The menu does not merge, close,
+delete, or dismiss pull requests/issues.
 
 ## Remotes
 
@@ -765,6 +816,44 @@ Menu option **22** manages local remote configuration:
 Removing or renaming a remote changes only local names, URLs, and tracking refs.
 It never deletes a remote repository or branch. URLs containing embedded
 credentials are refused; use SSH or `gh` authentication instead.
+
+## Worktrees and submodules
+
+Menu option **23** manages:
+
+- listing linked worktrees
+- adding a worktree on an existing or new branch
+- removing a clean linked worktree with a typed confirmation; Git refuses dirty
+  worktrees and the app never uses `--force`
+- pruning stale worktree metadata
+- listing, initializing/updating, and syncing submodules
+- adding a submodule from a URL
+- deinitializing a submodule with a typed confirmation
+- fully removing a submodule from the working tree, index, `.gitmodules`, and
+  local `.git/modules` storage with a typed confirmation
+
+Submodule updates and additions contact their remotes. Deinitialization keeps
+`.gitmodules` and the recorded commit. Full removal requires a clean submodule,
+never uses force, creates a safety ref, and leaves the removal staged for review
+and commit.
+
+## Dry-run mode
+
+Toggle with menu option **24** or start with:
+
+```bash
+git-create --dry-run
+```
+
+In dry-run mode the app shows the exact command and skips execution for:
+
+- worktree add/remove/prune
+- submodule update/sync/add/deinit/remove
+- remote add/change/rename/remove/prune
+- safety-backup cleanup
+
+Read-only lists and checks still run normally. Dry-run mode does not affect
+branch, tag, stash, commit, push, or GitHub write actions.
 
 ## Docker image and GHCR workflow
 
@@ -814,12 +903,14 @@ the app creates before running it.
 ## Command line mode
 
 The menu is the primary interface. Branch, stash, merge/rebase, tag/release,
-undo/revert, inspector, GitHub collaboration, remote, local-config, and
-Docker/GHCR actions are interactive menu actions. Non-interactive checks and
-scans are available for scripts and CI:
+undo/revert, inspector, GitHub collaboration, remote, local-config,
+worktree/submodule, and Docker/GHCR actions are interactive menu actions.
+Non-interactive checks and scans are available for scripts and CI:
 
 ```bash
 git-create check [PATH] [--offline] [--json] [--strict]
+git-create info [PATH] [--json]
+git-create audit [PATH] [--json]
 git-create scan [PATH] [--depth N] [--json]
 git-create secrets [PATH] [--json] [--max-commits N] [--max-blobs N]
 git-create --version
@@ -833,6 +924,8 @@ git-create check
 git-create check ~/Projects/my-project --offline
 git-create check . --json
 git-create check . --strict
+git-create info . --json
+git-create audit . --json
 git-create scan ~/Projects --depth 3
 git-create scan . --json
 git-create secrets .
@@ -851,6 +944,14 @@ git-create secrets . --json --max-commits 1000 --max-blobs 5000
 - `1`: matching patterns found
 - `2`: path is not a Git repository or is invalid
 
+`info --json` exposes the state used by the new menu actions: status counts,
+remotes, local/remote branches, tags, stashes, worktrees, submodules, upstream,
+and last commit. `info` exits `0` on success and `2` for an invalid repository.
+
+`audit --json` returns structured branch-protection data, Actions secret names
+(never values), recent workflow runs, and GHCR runs. It requires `gh`
+authentication and appropriate admin visibility.
+
 `--offline` skips remote, GitHub API, and `git fsck` checks. JSON output has
 the same check sections and summary counts as the human-readable report.
 `secrets --json` includes commit/blob counts, limits, truncation state, and
@@ -864,9 +965,10 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
 - **No force push.** The app never passes `--force` or `--force-with-lease`.
 - **No shared-history rewrite.** It does not run `filter-repo`, `rebase -i`,
   `reset --hard`, or `clean -fdx`. The explicit “undo last local commit” helper
-  uses `reset --soft` only when HEAD is not on a remote. Rebase is limited to
-  commits not contained in any remote branch or tag. Remote history is changed
-  only by normal pushes of new commits, tags, merges, or revert commits.
+  uses `reset --soft` and explicit amend only when HEAD is not on a remote.
+  Rebase is limited to commits not contained in any remote branch or tag.
+  Remote history is changed only by normal pushes of new commits, tags,
+  merges, or revert commits.
 - **No hard resets.** Staging can be cancelled. Risky staged paths are unstaged
   without touching working-tree files. The explicit local soft-undo keeps all
   changes and refuses if the commit is on a remote.
@@ -891,6 +993,9 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
   phrase.
 - **Docker/GHCR generation changes files only.** It does not build an image or
   push a package; the generated GitHub Actions workflow performs publishing.
+- **GitHub admin writes are explicit.** Branch-protection changes are shown
+  before applying, removal requires typing `DISABLE PROTECTION`, and Actions
+  secret values are read without echo, passed on stdin, and never printed.
 
 Secrets that were already pushed cannot be fixed by deleting the file in a new
 commit. Rotate the credential first, then consider history rewriting with a
@@ -905,13 +1010,20 @@ dedicated tool.
 - The secret scan is a guardrail, not a complete security scanner. It checks
   common private-key and token patterns and has file/size limits.
 - Binary files and files larger than 1 MiB are not content-scanned.
-- The app does not manage GitHub branch protection, Actions secrets, advanced
-  release assets, or organization permissions.
-- Merge/rebase conflicts require manual resolution; the app only continues or
-  aborts the operation.
+- Branch protection supports a basic policy, not every GitHub protection
+  option. Actions secrets are repository-level only; organization, environment,
+  Codespaces, and Dependabot scopes are not managed.
+- Conflict resolution is file-level. The app does not auto-resolve conflicts,
+  choose a side without confirmation, or auto-continue a merge/rebase.
 - Rebase refuses ranges over 200 commits because checking whether every commit
   is already shared would be expensive.
 - Tag signing depends on a valid SSH signing key and `allowed_signers` setup.
+- The pre-commit command is user-supplied and runs with your permissions in the
+  repository root; only configure commands you trust.
+- License templates are starters, not legal advice; choose the license that
+  fits your project.
+- GitHub protection/secret/workflow audits require appropriate `gh` scopes and
+  admin visibility; they are read-only and may report permission errors.
 - `git fsck` is only run in full/deep verification.
 - Menu actions are non-interactive where possible, so SSH keys with
   passphrases should be loaded into `ssh-agent` before pushing.
@@ -946,16 +1058,16 @@ branching, recovery, and container publishing. It does **not** currently
 provide:
 
 - GitHub organization management or team permissions
-- creating or managing linked worktrees or submodules
-- a pre-commit test/lint runner
+- force-removing dirty worktrees
 - Git LFS setup or migration
-- GitHub branch protection or Actions secret management
+- organization-level or environment-specific Actions secrets
+- advanced branch-protection matrices beyond a basic protection policy
 - automatic merge/rebase of diverged histories
 - bulk or shared-history rewriting, garbage collection, or repository size cleanup
-- automatic license selection, general-purpose CI pipelines, or security-policy generation
-- multi-account `gh` switching
-- remote branch rename or full remote branch management beyond `origin`
-- verifying that the generated GHCR workflow actually built successfully
+- automatic license choice beyond the offered MIT/ISC/BSD-3 templates
+- general-purpose CI pipelines or security-policy generation
+- remote branch rename or remote branch deletion outside `origin`
+- automatically fixing failed GHCR workflow runs
 
 Those are deliberate scope boundaries, not hidden features. Any future addition
 should preserve the same confirmation and secret-scanning rules.
@@ -967,7 +1079,8 @@ stores no credentials.
 
 Network activity only happens when you choose an action that needs it:
 
-- `git fetch`, `git pull`, `git push`, and `git ls-remote`
+- `git fetch`, `git pull`, `git push`, `git ls-remote`, and submodule
+  update/add operations
 - `gh` authentication, repository creation/cloning/renaming, release creation,
   pull-request/issue/review actions, and GitHub API reads
 - optional GitHub signing-key registration checks
@@ -1185,16 +1298,37 @@ tmp=$(mktemp -d)
 HOME="$tmp" ./git-create
 ```
 
+## Automated tests and CI
+
+The runtime is still one file. Development tests and CI configuration are
+separate repository artifacts and are not copied with the application:
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+`.github/workflows/ci.yml` runs syntax checks, the test suite, and the offline
+self-check on Python 3.9, 3.12, and 3.13. The suite includes black-box CLI
+tests and interactive-flow tests for worktrees, submodules, remotes, tags,
+branch protection, Actions secrets, audit output, and dry-run behavior.
+
+## Changelog
+
+Release history is maintained in [`CHANGELOG.md`](CHANGELOG.md).
+
 ## Repository layout
 
 ```text
-git-create              # the complete application (Python, executable)
-README.md               # this documentation
-.gitignore              # repository hygiene for the app itself
-.dockerignore           # keeps the Docker context clean if one is ever added
-.editorconfig           # consistent indentation and line endings across editors
-docs/screenshots/       # terminal-style README screenshots (SVG)
-examples/generated/     # showcase copies of generated files (not runtime deps)
+git-create                  # the complete application (Python, executable)
+README.md                   # this documentation
+CHANGELOG.md                # release history
+.gitignore                  # repository hygiene for the app itself
+.dockerignore               # keeps the Docker context clean if one is ever added
+.editorconfig               # consistent indentation and line endings across editors
+.github/workflows/ci.yml    # development CI
+docs/screenshots/           # terminal-style README screenshots (SVG)
+examples/generated/         # showcase copies of generated files (not runtime deps)
+tests/                      # development tests (not runtime deps)
 ```
 
 The application is still distributed as the single `git-create` file. The

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import getpass
 import json
 import os
 import re
@@ -27,9 +28,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
+from urllib.parse import quote
 
 APP = "git-create"
-VERSION = "1.5.0"
+VERSION = "1.7.0"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -294,6 +296,79 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 """
 
+LICENSE_TEMPLATES = {
+    "mit": """\
+MIT License
+
+Copyright (c) {year} {holder}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+""",
+    "isc": """\
+ISC License
+
+Copyright (c) {year} {holder}
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+""",
+    "bsd-3": """\
+BSD 3-Clause License
+
+Copyright (c) {year} {holder}
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice,
+   this list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+""",
+}
+
 GITATTRIBUTES_TEMPLATE = """\
 # Normalize text files to LF in the repository.
 * text=auto eol=lf
@@ -503,6 +578,7 @@ FILE_HELP = {
     ".gitignore": "Prevents secrets, dependencies, build output, and local files from being staged.",
     ".dockerignore": "Keeps .git, secrets, dependencies, and build output out of Docker build contexts.",
     "README.md": "Explains what the project is and how to use it; it is the front page on GitHub.",
+    "LICENSE": "States the legal terms under which others may use the project.",
     ".editorconfig": "Keeps indentation and line endings consistent across editors.",
     ".gitattributes": "Defines line-ending rules and marks binary files for Git.",
     ".env.example": "Documents required environment variable names without committing secret values.",
@@ -1576,7 +1652,7 @@ def remote_branch_names(root: Path) -> List[str]:
     return [
         line.strip()
         for line in result.out.splitlines()
-        if line.strip() and not line.strip().endswith("/HEAD")
+        if line.strip() and "/" in line.strip() and not line.strip().endswith("/HEAD")
     ]
 
 
@@ -2883,6 +2959,98 @@ def ensure_gitattributes(root: Path, ask_first: bool = True) -> bool:
     return write_new_file(path, GITATTRIBUTES_TEMPLATE, ".gitattributes")
 
 
+def precommit_hook_path(root: Path) -> Path:
+    return git_path(root, "hooks/pre-commit")
+
+
+PRE_COMMIT_HOOK = """\
+#!/bin/sh
+# Managed by git-create. Configure with:
+#   git config --local gitcreate.precommit 'command ...'
+command=$(git config --local --get gitcreate.precommit) || exit 0
+[ -z "$command" ] && exit 0
+exec sh -c "$command"
+"""
+
+
+def is_managed_precommit_hook(root: Path) -> bool:
+    hook = precommit_hook_path(root)
+    if not hook.is_file():
+        return False
+    try:
+        return "Managed by git-create" in hook.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def install_precommit_hook(root: Path) -> bool:
+    hook = precommit_hook_path(root)
+    if not git_out(root, "config", "--local", "--get", "gitcreate.precommit"):
+        failure("Set a local gitcreate.precommit command first.")
+        return False
+    if hook.exists():
+        try:
+            existing = hook.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            failure(f"Could not read existing hook: {exc}")
+            return False
+        if "Managed by git-create" not in existing:
+            failure(f"Refusing to overwrite an existing unrelated hook: {hook}")
+            return False
+        info("The managed pre-commit hook already exists.")
+        return False
+    try:
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text(PRE_COMMIT_HOOK, encoding="utf-8")
+        os.chmod(hook, 0o755)
+    except OSError as exc:
+        failure(f"Could not install hook: {exc}")
+        return False
+    success(f"Installed pre-commit hook: {hook}")
+    return True
+
+
+def remove_precommit_hook(root: Path) -> bool:
+    hook = precommit_hook_path(root)
+    if not hook.exists():
+        info("No pre-commit hook is installed.")
+        return False
+    try:
+        existing = hook.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        failure(f"Could not read hook: {exc}")
+        return False
+    if "Managed by git-create" not in existing:
+        failure(f"Refusing to remove a hook not managed by git-create: {hook}")
+        return False
+    try:
+        hook.unlink()
+    except OSError as exc:
+        failure(f"Could not remove hook: {exc}")
+        return False
+    success("Removed the git-create pre-commit hook.")
+    return True
+
+
+def ensure_license(root: Path, ask_first: bool = True) -> bool:
+    existing = find_license(root)
+    if existing:
+        info(f"LICENSE already exists: {existing}")
+        return False
+    choice = ask("License [m]it/[i]sc/[b]sd-3 or [c]ancel", default="m").lower()
+    keys = {"m": "mit", "mit": "mit", "i": "isc", "isc": "isc", "b": "bsd-3", "bsd": "bsd-3", "bsd-3": "bsd-3"}
+    key = keys.get(choice)
+    if not key:
+        info("License creation cancelled.")
+        return False
+    holder = ask("Copyright holder", default=cfg_get(read_global_config(), "user.name") or root.name)
+    year = ask("Copyright year", default=time.strftime("%Y"))
+    content = LICENSE_TEMPLATES[key].format(year=year, holder=holder)
+    if ask_first and not confirm(f"Create a {key.upper()} LICENSE for {holder} ({year})?", True):
+        return False
+    return write_new_file(root / "LICENSE", content, "LICENSE")
+
+
 def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
     target = root / ".env.example"
     source = root / ".env"
@@ -2954,12 +3122,25 @@ def print_file_checklist(root: Path) -> None:
 
 
 class App:
-    def __init__(self) -> None:
+    def __init__(self, dry_run: bool = False) -> None:
         # The current directory is the source of truth. This makes the tool
         # automatic when it is copied into a project root and run from there.
         # It also avoids silently selecting the tool's own repository when the
         # script is installed elsewhere and started from an unrelated folder.
         self.project = detect_git_root(Path.cwd())
+        self.dry_run = dry_run
+
+    def run_action(
+        self,
+        command: Sequence[object],
+        cwd: Optional[Path] = None,
+        timeout: int = 30,
+        env_extra: Optional[Dict[str, str]] = None,
+    ) -> CmdResult:
+        if self.dry_run:
+            info("DRY RUN: command not executed: " + shlex.join([str(item) for item in command]))
+            return CmdResult([str(item) for item in command], 0, "", "")
+        return run_cmd(command, cwd=cwd, timeout=timeout, env_extra=env_extra)
 
     # -- menu ---------------------------------------------------------------
 
@@ -3003,6 +3184,8 @@ class App:
                     "20": self.inspector_action,
                     "21": self.github_collab_action,
                     "22": self.remotes_action,
+                    "23": self.worktrees_action,
+                    "24": self.toggle_dry_run,
                 }
                 action = actions.get(choice)
                 if action is None:
@@ -3015,6 +3198,13 @@ class App:
             except EOFError:
                 print("\nInput closed; exiting.")
                 return 0
+
+    def toggle_dry_run(self) -> None:
+        self.dry_run = not self.dry_run
+        if self.dry_run:
+            warning("Dry-run mode ON: worktree, submodule, remote, and backup-cleanup changes will only be shown.")
+        else:
+            success("Dry-run mode OFF: commands will execute after confirmation.")
 
     def refresh_project(self) -> None:
         if self.project is None:
@@ -3037,6 +3227,7 @@ class App:
     def print_menu(self) -> None:
         print()
         print(col("Active project", "bold") + ": " + self.project_summary())
+        print(col("Dry-run mode: ", "bold") + (col("ON", "yellow") if self.dry_run else "off"))
         print(col("-" * 78, "dim"))
         items = [
             ("1", "Verify active project (full check)"),
@@ -3059,8 +3250,10 @@ class App:
             ("18", "Merge/rebase: guided operations and conflict recovery"),
             ("19", "Tags/releases: create, sign, push, delete, GitHub release"),
             ("20", "Repository inspector: status/diffs/log/file history"),
-            ("21", "GitHub collaboration: PRs, issues, reviews"),
+            ("21", "GitHub collaboration/audit: PRs, issues, reviews, settings"),
             ("22", "Remotes: list/add/edit/rename/remove/prune"),
+            ("23", "Worktrees/submodules: list/add/remove/update/sync"),
+            ("24", "Toggle dry-run mode for worktree/submodule/remote/backup changes"),
             ("0", "Exit"),
         ]
         for number, label in items:
@@ -3267,12 +3460,21 @@ class App:
                    details, file history, remotes, branches, tags, and upstream.
 
                 GitHub collaboration (option 21)
-                   Lists/views/creates pull requests and issues, and submits PR
-                   reviews through authenticated gh. Does not merge or close.
+                   Lists/views/creates pull requests and issues, submits PR
+                   reviews, and performs a read-only branch-protection, Actions
+                   secret-name, and workflow-run audit. Does not merge or close.
 
                 Remotes (option 22)
                    Lists, adds, changes, renames, removes, and prunes local
                    remote names/URLs. Never deletes anything on the server.
+
+                Worktrees/submodules (option 23)
+                   Lists/adds/removes worktrees, prunes stale metadata, lists/updates/
+                   syncs/adds/deinitializes/removes submodules. No force removal.
+
+                Dry-run mode (option 24 or --dry-run)
+                   Shows worktree, submodule, remote, and backup-cleanup commands
+                   without executing them.
 
                 Scan (option 2)
                    After scanning, 'a' runs local verification on every repository
@@ -3521,6 +3723,7 @@ class App:
             print("  4) Revert a commit with a new commit (safe for shared history)")
             print("  5) Undo the last local commit, keep changes (only if never pushed)")
             print("  6) Amend the last local commit (never if already pushed)")
+            print("  7) Manage git-create safety backups")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -3584,8 +3787,79 @@ class App:
                 self.undo_last_local_commit(path)
             elif choice == "6":
                 self.amend_last_commit(path)
+            elif choice == "7":
+                self.backup_cleanup_action(path)
             else:
                 warning("Unknown option.")
+
+    def backup_cleanup_action(self, path: Path) -> None:
+        git_dir_raw = git_out(path, "rev-parse", "--git-dir")
+        if not git_dir_raw:
+            failure("Could not locate the Git directory.")
+            return
+        git_dir = Path(git_dir_raw)
+        if not git_dir.is_absolute():
+            git_dir = path / git_dir
+        patches = sorted((git_dir / "git-create-backups").glob("*.patch")) if (git_dir / "git-create-backups").is_dir() else []
+        refs = [
+            line.strip()
+            for line in git_out(path, "for-each-ref", "--format=%(refname)", "refs/git-create-backups").splitlines()
+            if line.strip()
+        ]
+        if self.dry_run:
+            warning("Dry-run mode is ON: backup deletions will only be reported.")
+        explain(
+            "git-create keeps recovery patches and hidden safety refs under .git/git-create-backups/ "
+            "and refs/git-create-backups/.",
+            "These preserve discarded work, old branches/tags, and pre-merge commits. They are not "
+            "pushed, but they can accumulate over time.",
+            "Deleting them may make old objects unreachable. Only remove backups you no longer need.",
+        )
+        heading("git-create safety backups")
+        print(f"  Patches: {len(patches)}  Safety refs: {len(refs)}")
+        for patch in patches[-10:]:
+            print(f"    patch {patch.name}")
+        for ref in refs[-10:]:
+            print(f"    ref   {ref}")
+        print()
+        print("  1) Delete all backup patches")
+        print("  2) Delete all safety refs")
+        print("  3) Delete patches and safety refs")
+        print("  0) Back")
+        choice = ask("Choose an option", default="0", allow_empty=True)
+        if choice in ("0", ""):
+            return
+        if choice not in ("1", "2", "3"):
+            warning("Unknown option.")
+            return
+        phrase = "DELETE BACKUPS"
+        typed = ask(f'Type "{phrase}" to confirm cleanup', allow_empty=True)
+        if typed != phrase:
+            info("Backup cleanup cancelled.")
+            return
+        if self.dry_run:
+            info(
+                f"DRY RUN: would remove {len(patches) if choice in ('1', '3') else 0} "
+                f"patch(es) and {len(refs) if choice in ('2', '3') else 0} safety ref(s)."
+            )
+            return
+        removed_patches = 0
+        removed_refs = 0
+        if choice in ("1", "3"):
+            for patch in patches:
+                try:
+                    patch.unlink()
+                    removed_patches += 1
+                except OSError as exc:
+                    warning(f"Could not remove {patch}: {exc}")
+        if choice in ("2", "3"):
+            for ref in refs:
+                result = git(path, "update-ref", "-d", ref, timeout=10)
+                if result.returncode == 0:
+                    removed_refs += 1
+                else:
+                    warning(f"Could not remove {ref}")
+        success(f"Removed {removed_patches} patch(es) and {removed_refs} safety ref(s).")
 
     def amend_last_commit(self, path: Path) -> None:
         if not git_out(path, "symbolic-ref", "--short", "-q", "HEAD"):
@@ -3624,6 +3898,11 @@ class App:
             "It is refused if HEAD exists on a remote branch or tag. Unstaged changes are not "
             "included; only staged content and the message are amended.",
         )
+        backup = create_backup_ref(path, f"before-amend-{git_out(path, 'symbolic-ref', '--short', '-q', 'HEAD')}")
+        if not backup:
+            failure("Could not create a safety ref; amend cancelled.")
+            return
+        info(f"Safety ref: {backup}")
         if staged:
             info(f"Staged paths that will be added: {staged}")
         else:
@@ -3908,6 +4187,7 @@ class App:
             print("  3) Continue an in-progress merge/rebase")
             print("  4) Abort an in-progress merge/rebase")
             print("  5) Show branch graph")
+            print("  6) Resolve conflict files interactively")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -3922,8 +4202,86 @@ class App:
                 self.abort_merge_rebase(path)
             elif choice == "5":
                 print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+            elif choice == "6":
+                self.resolve_conflicts_action(path)
             else:
                 warning("Unknown option.")
+
+    def resolve_conflicts_action(self, path: Path) -> None:
+        operation = git_operation_kind(path)
+        if not operation:
+            info("No merge or rebase is in progress.")
+            return
+        result = git(path, "diff", "--name-only", "--diff-filter=U", "-z", timeout=20)
+        conflicts = [item for item in result.out.split("\0") if item] if result.returncode == 0 else []
+        if not conflicts:
+            success("No unmerged paths remain. Use option 3 to continue the operation.")
+            return
+        explain(
+            "Lists unmerged files and helps resolve them one at a time.",
+            "Conflict resolution requires a human decision: keep your side, take the other side, "
+            "or edit the file manually.",
+            "Choosing ours/theirs discards the other side for that file. The app confirms each "
+            "choice, stages the file, and never continues the merge/rebase automatically.",
+        )
+        editor = git_out(path, "config", "--get", "core.editor") or os.environ.get("EDITOR") or "nano"
+        while True:
+            heading(f"Conflicts in {operation}")
+            for index, conflict in enumerate(conflicts, 1):
+                print(f"  {index:>2}) {conflict}")
+            print("  0) Back")
+            choice = ask("Number to resolve (or 0)", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            try:
+                index = int(choice)
+            except ValueError:
+                warning("Enter a number.")
+                continue
+            if not 1 <= index <= len(conflicts):
+                warning("Invalid selection.")
+                continue
+            conflict = conflicts[index - 1]
+            print("  1) Open in editor")
+            print("  2) Keep our version (git --ours)")
+            print("  3) Keep their version (git --theirs)")
+            print("  4) Mark resolved (file already edited)")
+            print("  0) Skip")
+            action = ask("Resolution", default="0", allow_empty=True)
+            if action == "1":
+                code = run_interactive(shlex.split(editor) + [str(path / conflict)], cwd=path)
+                if code != 0:
+                    warning("Editor exited nonzero; file not staged.")
+                    continue
+                staged = run_cmd(["git", "add", "--", conflict], cwd=path, timeout=30)
+                if staged.returncode == 0:
+                    success(f"Staged {conflict}.")
+                else:
+                    failure("Could not stage the file.")
+            elif action in ("2", "3"):
+                side = "--ours" if action == "2" else "--theirs"
+                if not confirm(f"Keep {side[2:]} for {conflict} and stage it?", False):
+                    continue
+                checkout = run_cmd(["git", "checkout", side, "--", conflict], cwd=path, timeout=30)
+                if checkout.returncode != 0:
+                    failure("Could not select that side.")
+                    continue
+                staged = run_cmd(["git", "add", "--", conflict], cwd=path, timeout=30)
+                if staged.returncode == 0:
+                    success(f"Staged {conflict} using {side[2:]}.")
+                else:
+                    failure("Could not stage the file.")
+            elif action == "4":
+                staged = run_cmd(["git", "add", "--", conflict], cwd=path, timeout=30)
+                if staged.returncode == 0:
+                    success(f"Staged {conflict}.")
+                else:
+                    failure("Could not stage the file.")
+            result = git(path, "diff", "--name-only", "--diff-filter=U", "-z", timeout=20)
+            conflicts = [item for item in result.out.split("\0") if item] if result.returncode == 0 else []
+            if not conflicts:
+                success("All conflicts are staged. Use option 3 to continue.")
+                return
 
     def merge_branch(self, path: Path) -> None:
         if git_operation_kind(path) or in_progress_operations(path):
@@ -4436,6 +4794,8 @@ class App:
             "Removing a remote only removes the local name and tracking refs. It does not "
             "delete the remote repository or branches.",
         )
+        if self.dry_run:
+            warning("Dry-run mode is ON: remote changes are shown but not executed.")
         while True:
             heading("Remotes")
             print(git_out(path, "remote", "-v") or "  (no remotes)")
@@ -4520,10 +4880,17 @@ class App:
                 print("Command: " + col(shlex.join(command), "dim"))
                 if not confirm("Run this remote operation?", True):
                     continue
-                result = run_cmd(command, cwd=path, timeout=120 if choice == "6" else 30, env_extra=remote_env() if choice == "6" else None)
+                result = self.run_action(
+                    command,
+                    cwd=path,
+                    timeout=120 if choice == "6" else 30,
+                    env_extra=remote_env() if choice == "6" else None,
+                )
                 if result.combined:
                     print(result.combined)
-                if result.returncode == 0:
+                if self.dry_run:
+                    info("DRY RUN: remote configuration was not changed.")
+                elif result.returncode == 0:
                     success("Remote configuration updated.")
                 else:
                     failure("Remote operation failed.")
@@ -4590,6 +4957,320 @@ class App:
             else:
                 warning("Unknown option.")
 
+    def worktrees_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "A linked worktree is a second checkout that shares this repository's .git "
+            "history. A submodule is a separate repository embedded at a path.",
+            "Worktrees let you work on two branches at once. Submodules let a project "
+            "reference a pinned commit from another repository.",
+            "Worktree removal refuses dirty directories. Submodule deinit and removal are "
+            "explicit, confirmed, and never forced.",
+        )
+        if self.dry_run:
+            warning("Dry-run mode is ON: commands are shown but not executed.")
+        while True:
+            heading("Worktrees and submodules")
+            print("  1) List worktrees")
+            print("  2) Add a worktree")
+            print("  3) Remove a worktree")
+            print("  4) Prune stale worktree metadata")
+            print("  5) List submodules")
+            print("  6) Initialize/update submodules")
+            print("  7) Sync submodule URLs")
+            print("  8) Add a submodule")
+            print("  9) Deinitialize a submodule")
+            print(" 10) Remove a submodule (typed confirmation)")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                print(git_out(path, "worktree", "list") or "(no worktrees)")
+            elif choice == "2":
+                default_path = path.parent / f"{path.name}-worktree"
+                target = ask_path("New worktree path", default=default_path)
+                if target.exists():
+                    failure(f"Target already exists: {target}")
+                    continue
+                current_branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "main"
+                branch = ask("Branch for the new worktree", default=f"{current_branch}-worktree")
+                if not valid_branch_name(path, branch):
+                    failure("Invalid branch name.")
+                    continue
+                if branch in local_branch_names(path):
+                    command = ["git", "worktree", "add", str(target), branch]
+                    why = "Checks out the existing branch in a separate directory."
+                else:
+                    command = ["git", "worktree", "add", "-b", branch, str(target)]
+                    why = "Creates a new branch at the current commit and checks it out in a separate directory."
+                explain(
+                    "Runs git worktree add.",
+                    why,
+                    "The worktree shares history but has its own working files and index. "
+                    "Nothing is copied or overwritten.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Create this worktree?", True):
+                    continue
+                result = self.run_action(command, cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if self.dry_run:
+                    info("DRY RUN: worktree was not created.")
+                elif result.returncode == 0:
+                    success(f"Worktree created: {target}")
+                else:
+                    failure("Worktree creation failed.")
+            elif choice == "3":
+                listing = git_out(path, "worktree", "list", "--porcelain")
+                worktrees: List[str] = []
+                current: Dict[str, str] = {}
+                for line in listing.splitlines() + [""]:
+                    if not line:
+                        if current.get("worktree"):
+                            worktrees.append(current["worktree"])
+                        current = {}
+                    elif line.startswith("worktree "):
+                        current["worktree"] = line[len("worktree "):]
+                if len(worktrees) < 2:
+                    warning("There is no linked worktree to remove.")
+                    continue
+                print("  Worktrees: " + ", ".join(worktrees))
+                target_text = ask("Worktree path to remove")
+                target = Path(os.path.expanduser(target_text))
+                if not target.is_absolute():
+                    target = (path / target).resolve()
+                if str(target) not in worktrees:
+                    failure("Choose one of the listed worktrees.")
+                    continue
+                if target.resolve() == path.resolve():
+                    failure("Refusing to remove the main worktree.")
+                    continue
+                phrase = f"REMOVE WORKTREE {target}"
+                typed = ask(f'Type "{phrase}" to remove it', allow_empty=True)
+                if typed != phrase:
+                    info("Worktree removal cancelled.")
+                    continue
+                explain(
+                    f"Runs git worktree remove {target}.",
+                    "This deletes that checkout's working files and removes its worktree metadata.",
+                    "Dirty worktrees are refused by Git; the app never uses --force. Branches and commits remain.",
+                )
+                result = self.run_action(["git", "worktree", "remove", str(target)], cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if self.dry_run:
+                    info("DRY RUN: worktree was not removed.")
+                elif result.returncode == 0:
+                    success("Worktree removed.")
+                else:
+                    failure("Worktree removal failed; it may contain uncommitted changes.")
+            elif choice == "4":
+                dry = git_out(path, "worktree", "prune", "--dry-run")
+                print(dry or "(nothing to prune)")
+                if confirm("Prune stale worktree metadata?", True):
+                    result = self.run_action(["git", "worktree", "prune"], cwd=path, timeout=30)
+                    if self.dry_run:
+                        info("DRY RUN: worktree metadata was not pruned.")
+                    elif result.returncode == 0:
+                        success("Worktree metadata pruned.")
+                    else:
+                        failure("Worktree prune failed.")
+            elif choice == "5":
+                print(git_out(path, "submodule", "status", "--recursive") or "(no submodules)")
+            elif choice == "6":
+                if not (path / ".gitmodules").exists():
+                    info("No .gitmodules file found.")
+                    continue
+                explain(
+                    "Runs git submodule update --init --recursive.",
+                    "Clones missing submodules and checks each one out at the commit recorded by the parent repository.",
+                    "This contacts submodule remotes and does not update parent history by itself.",
+                )
+                if not confirm("Initialize/update all submodules?", True):
+                    continue
+                result = self.run_action(["git", "submodule", "update", "--init", "--recursive"], cwd=path, timeout=600, env_extra=remote_env())
+                if result.combined:
+                    print(result.combined)
+                if self.dry_run:
+                    info("DRY RUN: submodules were not updated.")
+                elif result.returncode == 0:
+                    success("Submodules updated.")
+                else:
+                    failure("Submodule update failed.")
+            elif choice == "7":
+                if not (path / ".gitmodules").exists():
+                    info("No .gitmodules file found.")
+                    continue
+                explain(
+                    "Runs git submodule sync --recursive.",
+                    "Copies URL changes from .gitmodules into the local submodule configuration.",
+                    "This does not fetch or update submodule commits.",
+                )
+                result = self.run_action(["git", "submodule", "sync", "--recursive"], cwd=path, timeout=60)
+                if self.dry_run:
+                    info("DRY RUN: submodule URLs were not synchronized.")
+                elif result.returncode == 0:
+                    success("Submodule URLs synchronized.")
+                else:
+                    failure("Submodule sync failed.")
+            elif choice == "8":
+                url = ask("Submodule repository URL")
+                if not url or url.startswith("-"):
+                    failure("A valid URL is required.")
+                    continue
+                if re.match(r"^https?://[^/@\s]+@", url):
+                    failure("Refusing to store credentials in a submodule URL. Use SSH or gh authentication.")
+                    continue
+                rel = ask("Submodule path inside this repository")
+                target = path / rel
+                try:
+                    target.resolve().relative_to(path.resolve())
+                except ValueError:
+                    failure("The submodule path must stay inside this repository.")
+                    continue
+                if target.exists():
+                    failure(f"Path already exists: {target}")
+                    continue
+                explain(
+                    f"Runs git submodule add {url} {rel}.",
+                    "Adds a separate repository at the given path and records its commit in .gitmodules.",
+                    "This contacts the submodule remote. Review the resulting .gitmodules and git status before committing.",
+                )
+                print("Command: " + col(shlex.join(["git", "submodule", "add", url, rel]), "dim"))
+                if not confirm("Add this submodule?", True):
+                    continue
+                result = self.run_action(["git", "submodule", "add", url, rel], cwd=path, timeout=600, env_extra=remote_env())
+                if result.combined:
+                    print(result.combined)
+                if self.dry_run:
+                    info("DRY RUN: submodule was not added.")
+                elif result.returncode == 0:
+                    success("Submodule added.")
+                else:
+                    failure("Submodule add failed.")
+            elif choice == "9":
+                if not (path / ".gitmodules").exists():
+                    info("No .gitmodules file found.")
+                    continue
+                configured = run_cmd(
+                    ["git", "-C", str(path), "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"],
+                    timeout=15,
+                )
+                submodule_paths = []
+                for line in configured.out.splitlines():
+                    _, _, value = line.partition(" ")
+                    if value.strip():
+                        submodule_paths.append(value.strip())
+                if not submodule_paths:
+                    info("No submodule paths found.")
+                    continue
+                print("  Submodule paths: " + ", ".join(submodule_paths))
+                target = ask("Submodule path to deinitialize")
+                if target not in submodule_paths:
+                    failure("Choose one of the configured submodule paths.")
+                    continue
+                phrase = f"DEINIT SUBMODULE {target}"
+                typed = ask(f'Type "{phrase}" to deinitialize it', allow_empty=True)
+                if typed != phrase:
+                    info("Submodule deinit cancelled.")
+                    continue
+                explain(
+                    f"Runs git submodule deinit -- {target}.",
+                    "Deinitialization removes the submodule's working-tree contents and local configuration, "
+                    "but keeps the .gitmodules entry and the parent repository's recorded commit.",
+                    "Git refuses if the submodule worktree has local changes. The app never forces deinit or removes submodule history.",
+                )
+                result = self.run_action(["git", "submodule", "deinit", "--", target], cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if self.dry_run:
+                    info("DRY RUN: submodule was not deinitialized.")
+                elif result.returncode == 0:
+                    success("Submodule deinitialized.")
+                else:
+                    failure("Submodule deinit failed; it may contain local changes.")
+            elif choice == "10":
+                if not (path / ".gitmodules").exists():
+                    info("No .gitmodules file found.")
+                    continue
+                configured = run_cmd(
+                    ["git", "-C", str(path), "config", "-f", ".gitmodules", "--get-regexp", r"^submodule\..*\.path$"],
+                    timeout=15,
+                )
+                submodules: Dict[str, str] = {}
+                for line in configured.out.splitlines():
+                    key, _, value = line.partition(" ")
+                    if key.startswith("submodule.") and key.endswith(".path") and value.strip():
+                        submodules[value.strip()] = key[len("submodule.") : -len(".path")]
+                if not submodules:
+                    info("No submodule paths found.")
+                    continue
+                for submodule_path, submodule_name in submodules.items():
+                    print(f"  {submodule_path}  (name: {submodule_name})")
+                target = ask("Submodule path to remove")
+                if target not in submodules:
+                    failure("Choose one of the configured submodule paths.")
+                    continue
+                submodule_name = submodules[target]
+                phrase = f"REMOVE SUBMODULE {target}"
+                typed = ask(f'Type "{phrase}" to remove it', allow_empty=True)
+                if typed != phrase:
+                    info("Submodule removal cancelled.")
+                    continue
+                if self.dry_run:
+                    info("DRY RUN: safety ref would be created.")
+                else:
+                    backup = create_backup_ref(path, f"before-submodule-remove-{submodule_name}")
+                    if not backup:
+                        failure("Could not create a safety ref; submodule removal cancelled.")
+                        continue
+                    info(f"Safety ref: {backup}")
+                explain(
+                    f"Runs git submodule deinit, git rm, removes the local .git/modules entry, and removes "
+                    f"submodule.{submodule_name} config for {target}.",
+                    "Full removal deletes the submodule working tree and local clone. The parent commit "
+                    "still records the old gitlink until you commit the removal.",
+                    "Git refuses dirty submodules; the app never uses force. A typed confirmation is required.",
+                )
+                deinit = self.run_action(["git", "submodule", "deinit", "--", target], cwd=path, timeout=60)
+                if deinit.returncode != 0:
+                    failure("Submodule deinit failed; removal cancelled.")
+                    print(deinit.combined)
+                    continue
+                removed = self.run_action(["git", "rm", "--", target], cwd=path, timeout=60)
+                if removed.returncode != 0:
+                    failure("git rm failed; submodule files may remain.")
+                    print(removed.combined)
+                    continue
+                self.run_action(
+                    ["git", "-C", str(path), "config", "-f", ".gitmodules", "--remove-section", f"submodule.{submodule_name}"],
+                    timeout=30,
+                )
+                self.run_action(["git", "config", "--remove-section", f"submodule.{submodule_name}"], cwd=path, timeout=30)
+                self.run_action(["git", "add", "--", ".gitmodules"], cwd=path, timeout=30)
+                if self.dry_run:
+                    info("DRY RUN: local .git/modules cleanup skipped.")
+                    info("DRY RUN: submodule was not removed.")
+                    continue
+                modules_root = (path / ".git" / "modules").resolve()
+                module_path = (modules_root / submodule_name).resolve()
+                try:
+                    module_path.relative_to(modules_root)
+                except ValueError:
+                    warning("Submodule name escapes .git/modules; local module directory was not removed.")
+                else:
+                    if module_path.exists():
+                        try:
+                            shutil.rmtree(module_path)
+                        except OSError as exc:
+                            warning(f"Could not remove {module_path}: {exc}")
+                success("Submodule removed from the working tree and index.")
+                info("Review and commit the .gitmodules/index changes with option 8.")
+
     def branches_action(self) -> None:
         path = self.require_project()
         if path is None:
@@ -4626,6 +5307,7 @@ class App:
             print("  6) Delete remote origin branch")
             print("  7) Set upstream for current branch")
             print("  8) Show branch graph")
+            print("  9) Rename an origin branch")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -4645,9 +5327,91 @@ class App:
             elif choice == "7":
                 self.set_upstream(path)
             elif choice == "8":
-                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "30"))
+                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+            elif choice == "9":
+                self.rename_remote_branch(path)
             else:
                 warning("Unknown option.")
+
+    def rename_remote_branch(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        if "origin" not in remote_urls(path):
+            failure("No origin remote.")
+            return
+        remote = remote_branch_names(path)
+        if not remote:
+            warning("No remote-tracking branches found. Fetch first.")
+            return
+        print("  Remote branches: " + ", ".join(remote))
+        old_target = ask("Remote branch to rename (for example origin/feature)")
+        if old_target not in remote or not old_target.startswith("origin/"):
+            failure("Choose an origin branch from the list.")
+            return
+        old_name = old_target.split("/", 1)[1]
+        default = remote_default_branch(path)
+        if not default:
+            _, default, _ = check_remote_access(path)
+        if default and old_name == default:
+            failure("Refusing to rename the remote default branch here; change the GitHub default branch first.")
+            return
+        new_name = ask("New remote branch name")
+        if not valid_branch_name(path, new_name):
+            failure("Invalid branch name.")
+            return
+        if f"origin/{new_name}" in remote:
+            failure(f"Remote branch already exists: origin/{new_name}")
+            return
+        info(f"Fetching the latest origin/{old_name} before renaming...")
+        fetch = run_cmd(["git", "fetch", "origin", old_name], cwd=path, timeout=60, env_extra=remote_env())
+        if fetch.returncode != 0:
+            failure("Could not fetch the remote branch; rename cancelled.")
+            print(fetch.combined)
+            return
+        backup = create_backup_ref(path, f"before-remote-rename-{old_name}", old_target)
+        if not backup:
+            failure("Could not create a local safety ref; rename cancelled.")
+            return
+        info(f"Local safety ref: {backup}")
+        explain(
+            f"Pushes {old_target} to the new remote branch origin/{new_name}.",
+            "A branch rename on a remote is a new branch push followed by deletion of the old "
+            "name. Git does not rename remote branches in place.",
+            "The old branch is only deleted after a separate typed confirmation. No force is used "
+            "and other clones must update their tracking branches.",
+        )
+        command = [
+            "git",
+            "push",
+            "origin",
+            f"refs/remotes/origin/{old_name}:refs/heads/{new_name}",
+        ]
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Create remote branch origin/{new_name}?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=120, env_extra=remote_env())
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Remote branch creation failed. The old remote branch was not touched.")
+            return
+        success(f"Created origin/{new_name}.")
+        phrase = f"DELETE REMOTE {old_target}"
+        typed = ask(f'Type "{phrase}" to delete the old remote branch', allow_empty=True)
+        if typed != phrase:
+            info("Old remote branch kept. Finish the rename manually if needed.")
+            return
+        delete = run_cmd(["git", "push", "origin", "--delete", old_name], cwd=path, timeout=120, env_extra=remote_env())
+        if delete.combined:
+            print(delete.combined)
+        if delete.returncode == 0:
+            success(f"Renamed remote branch to origin/{new_name}.")
+            run_cmd(["git", "fetch", "--prune", "origin"], cwd=path, timeout=60, env_extra=remote_env())
+            info("Local branches and other clones may still track the old name; set upstream explicitly.")
+        else:
+            failure("Old remote branch deletion failed; both names may exist.")
+            info("No force was used.")
 
     def create_branch(self, path: Path) -> None:
         name = ask("New branch name")
@@ -4939,6 +5703,9 @@ class App:
             print("  5) View an issue")
             print("  6) Create an issue")
             print("  7) Review a pull request")
+            print("  8) Security and workflow audit (read-only)")
+            print("  9) Manage branch protection")
+            print(" 10) Manage Actions secrets")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -5038,6 +5805,9 @@ class App:
                     failure("Choose approve, comment, or request changes.")
                     continue
                 body = ask("Review body (optional)", allow_empty=True)
+                if flag in ("--comment", "--request-changes") and not body:
+                    failure("A review body is required for comments and change requests.")
+                    continue
                 command = [gh, "pr", "review", number, flag]
                 if body:
                     command.extend(["--body", body])
@@ -5055,8 +5825,278 @@ class App:
                     success("Review submitted.")
                 else:
                     failure("Review submission failed.")
+            elif choice == "8":
+                self.github_security_audit(path)
+            elif choice == "9":
+                self.branch_protection_action(path)
+            elif choice == "10":
+                self.actions_secrets_action(path)
             else:
                 warning("Unknown option.")
+
+    def branch_protection_action(self, path: Path) -> None:
+        parsed = parse_github_url(remote_urls(path).get("origin", ""))
+        if not parsed:
+            failure("No GitHub origin remote found.")
+            return
+        owner, repo = parsed
+        branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not branch:
+            failure("Detached HEAD; check out a branch first.")
+            return
+        gh = which_gh() or "gh"
+        encoded_branch = quote(branch, safe="")
+        endpoint = f"repos/{owner}/{repo}/branches/{encoded_branch}/protection"
+        explain(
+            "Branch protection is a GitHub server-side rule that can require pull requests, "
+            "reviews, status checks, or conversation resolution.",
+            "It protects shared branches from accidental direct pushes and is independent of "
+            "local Git configuration.",
+            "Changing protection needs admin permission. Every write is confirmed and the app "
+            "does not remove protection without a typed phrase.",
+        )
+        while True:
+            heading(f"Branch protection: {owner}/{repo}@{branch}")
+            print("  1) Show current protection")
+            print("  2) Enable basic protection")
+            print("  3) Remove protection")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                result = run_cmd([gh, "api", endpoint], cwd=path, timeout=60)
+                if result.returncode == 0:
+                    print(result.out)
+                else:
+                    warning("No protection is set or it is not readable.")
+                    info(one_line(result.combined, 200))
+            elif choice == "2":
+                reviews_text = ask("Required approving reviews", default="1")
+                try:
+                    reviews = max(0, min(int(reviews_text), 6))
+                except ValueError:
+                    failure("Enter a number from 0 to 6.")
+                    continue
+                enforce = confirm("Enforce protection for administrators too?", False)
+                dismiss = confirm("Dismiss stale approvals when new commits are pushed?", True)
+                conversation = confirm("Require conversation resolution before merge?", True)
+                body = {
+                    "required_status_checks": None,
+                    "enforce_admins": enforce,
+                    "required_pull_request_reviews": (
+                        {
+                            "dismiss_stale_reviews": dismiss,
+                            "require_code_owner_reviews": False,
+                            "required_approving_review_count": reviews,
+                            "require_last_push_approval": False,
+                        }
+                        if reviews
+                        else None
+                    ),
+                    "restrictions": None,
+                    "required_conversation_resolution": conversation,
+                }
+                payload = json.dumps(body)
+                print("Protection plan:")
+                print(f"  required reviews: {reviews}" + (" (none)" if not reviews else ""))
+                if reviews:
+                    print(f"  dismiss stale: {dismiss}")
+                print(f"  require conversation resolution: {conversation}")
+                print(f"  enforce for admins: {enforce}")
+                if not confirm("Apply this branch protection?", False):
+                    continue
+                result = run_cmd(
+                    [gh, "api", "--method", "PUT", endpoint, "--input", "-"],
+                    cwd=path,
+                    timeout=60,
+                    input_text=payload,
+                )
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Branch protection updated.")
+                else:
+                    failure("Branch protection update failed. Admin permission may be required.")
+            elif choice == "3":
+                phrase = "DISABLE PROTECTION"
+                typed = ask(f'Type "{phrase}" to remove branch protection', allow_empty=True)
+                if typed != phrase:
+                    info("Protection removal cancelled.")
+                    continue
+                result = run_cmd([gh, "api", "--method", "DELETE", endpoint], cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Branch protection removed.")
+                else:
+                    failure("Could not remove branch protection.")
+            else:
+                warning("Unknown option.")
+
+    def actions_secrets_action(self, path: Path) -> None:
+        parsed = parse_github_url(remote_urls(path).get("origin", ""))
+        if not parsed:
+            failure("No GitHub origin remote found.")
+            return
+        owner, repo = parsed
+        gh = which_gh() or "gh"
+        explain(
+            f"Manages GitHub Actions secrets for {owner}/{repo} with gh secret commands.",
+            "Actions secrets inject credentials into workflows without committing them to Git.",
+            "Secret values are read without echo and passed on stdin, never printed. Deletion "
+            "requires a typed confirmation.",
+        )
+        while True:
+            heading(f"Actions secrets: {owner}/{repo}")
+            print("  1) List secret names")
+            print("  2) Set or replace a secret")
+            print("  3) Delete a secret")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                result = run_cmd([gh, "secret", "list"], cwd=path, timeout=60)
+                print(result.combined or "(no secrets)")
+            elif choice == "2":
+                name = ask("Secret name").strip()
+                if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                    failure("Use uppercase letters, numbers, and underscores, starting with a letter.")
+                    continue
+                if not sys.stdin.isatty():
+                    failure("Secret input requires a terminal.")
+                    continue
+                value = getpass.getpass("Secret value (not echoed): ")
+                if not value:
+                    failure("An empty secret value is not allowed.")
+                    continue
+                if not confirm(f"Set or replace Actions secret '{name}'?", True):
+                    continue
+                result = run_cmd(
+                    [gh, "secret", "set", name],
+                    cwd=path,
+                    timeout=60,
+                    input_text=value,
+                )
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success(f"Secret '{name}' stored.")
+                else:
+                    failure("Secret update failed.")
+            elif choice == "3":
+                name = ask("Secret name to delete").strip()
+                if not re.fullmatch(r"[A-Z][A-Z0-9_]*", name):
+                    failure("Invalid secret name.")
+                    continue
+                phrase = f"DELETE SECRET {name}"
+                typed = ask(f'Type "{phrase}" to delete it', allow_empty=True)
+                if typed != phrase:
+                    info("Secret deletion cancelled.")
+                    continue
+                result = run_cmd([gh, "secret", "delete", name], cwd=path, timeout=60)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success(f"Secret '{name}' deleted.")
+                else:
+                    failure("Secret deletion failed.")
+
+    def github_security_audit(self, path: Path) -> None:
+        origin = remote_urls(path).get("origin", "")
+        parsed = parse_github_url(origin)
+        if not parsed:
+            failure("No GitHub origin remote found.")
+            return
+        owner, repo = parsed
+        branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not branch:
+            failure("Detached HEAD; check out a branch first.")
+            return
+        gh = which_gh() or "gh"
+        full = f"{owner}/{repo}"
+        explain(
+            f"Reads branch protection, Actions secret names, and recent workflow runs for {full}.",
+            "These checks reveal whether the remote is protected and whether CI is running, "
+            "without reading secret values or changing repository settings.",
+            "All calls are read-only. A missing scope or admin permission is reported, not bypassed.",
+        )
+        heading(f"GitHub audit: {full}")
+        protection = run_cmd(
+            [gh, "api", f"repos/{owner}/{repo}/branches/{branch}/protection"],
+            cwd=path,
+            timeout=60,
+        )
+        if protection.returncode == 0:
+            success(f"Branch protection is enabled for {branch}.")
+            print(one_line(protection.out, 500))
+        else:
+            warning(f"No branch protection readable for {branch}.")
+            info(one_line(protection.combined, 200))
+        secrets_result = run_cmd(
+            [gh, "api", f"repos/{owner}/{repo}/actions/secrets", "--jq", ".secrets[].name"],
+            cwd=path,
+            timeout=60,
+        )
+        if secrets_result.returncode == 0:
+            names = [line for line in secrets_result.out.splitlines() if line.strip()]
+            if names:
+                info("Actions secret names (values are never read): " + ", ".join(names))
+            else:
+                info("No Actions repository secrets found.")
+        else:
+            warning("Could not read Actions secret names; the token may need admin scope.")
+            info(one_line(secrets_result.combined, 200))
+        runs = run_cmd([gh, "run", "list", "--limit", "10"], cwd=path, timeout=60)
+        if runs.returncode == 0:
+            print(col("Recent workflow runs:", "bold"))
+            print(runs.combined or "(none)")
+        else:
+            warning("Could not list workflow runs.")
+            info(one_line(runs.combined, 200))
+        if (path / ".github" / "workflows" / "ghcr.yml").exists():
+            ghcr_runs = run_cmd(
+                [gh, "run", "list", "--workflow", "ghcr.yml", "--limit", "5"],
+                cwd=path,
+                timeout=60,
+            )
+            if ghcr_runs.returncode == 0:
+                print(col("GHCR workflow runs:", "bold"))
+                print(ghcr_runs.combined or "(none)")
+                latest = run_cmd(
+                    [gh, "run", "list", "--workflow", "ghcr.yml", "--limit", "1", "--json", "databaseId,status,conclusion"],
+                    cwd=path,
+                    timeout=60,
+                )
+                if latest.returncode == 0:
+                    try:
+                        rows = json.loads(latest.out)
+                    except json.JSONDecodeError:
+                        rows = []
+                    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                        run_id = rows[0].get("databaseId")
+                        conclusion = str(rows[0].get("conclusion") or "")
+                        if run_id and conclusion.lower() == "failure":
+                            warning("The latest GHCR run failed.")
+                            if confirm("Show failed workflow log lines?", True):
+                                logs = run_cmd(
+                                    [gh, "run", "view", str(run_id), "--log-failed"],
+                                    cwd=path,
+                                    timeout=120,
+                                )
+                                lines = logs.combined.splitlines() if logs.combined else []
+                                for line in lines[-200:]:
+                                    print(line)
+                                if len(lines) > 200:
+                                    info("Failure log truncated to the last 200 lines.")
+                        if run_id and confirm("Watch the latest GHCR run until it finishes?", False):
+                            run_interactive(
+                                [gh, "run", "watch", str(run_id), "--exit-status"],
+                                cwd=path,
+                            )
+            else:
+                warning("Could not list GHCR workflow runs.")
 
     def docker_action(self) -> None:
         path = self.require_project()
@@ -5659,6 +6699,31 @@ class App:
         print(col("Staged changes:", "bold"))
         print(git_out(path, "diff", "--cached", "--stat"))
         show_staged_diff(path)
+        precommit = git_out(path, "config", "--get", "gitcreate.precommit")
+        managed_hook = is_managed_precommit_hook(path)
+        if precommit and managed_hook:
+            info("A managed pre-commit hook will run the configured command during git commit.")
+        elif precommit:
+            explain(
+                f"Runs the configured local pre-commit command with sh -c: {precommit}",
+                "A project-specific test or lint command can stop a bad commit before it enters history.",
+                "The command runs in the repository root. Its exit status decides whether the commit continues.",
+            )
+            if confirm("Run the pre-commit command now?", True):
+                check = run_cmd(["sh", "-c", precommit], cwd=path, timeout=600)
+                if check.combined:
+                    print(check.combined)
+                if check.returncode != 0:
+                    failure("Pre-commit command failed; commit cancelled.")
+                    return False
+                staged_now = staged_paths(path, added_only=False)
+                changed_by_precommit = worktree_mismatch(path, staged_now)
+                if changed_by_precommit:
+                    failure("The pre-commit command modified staged files.")
+                    info("Review and stage the updated content again before committing.")
+                    return False
+            elif not confirm("Run no pre-commit check and continue?", False):
+                return False
         explain(
             "git commit saves the staged snapshot as a new local commit with your message.",
             "The commit is a checkpoint you can review, sign, and push. It does not upload "
@@ -5964,7 +7029,7 @@ class App:
             effective_name, effective_email = effective_identity(path)
             heading("Repository-local Git settings")
             print(f"  Effective identity: {effective_name or '(missing)'} <{effective_email or '(missing)'}>")
-            for key in ("user.name", "user.email", "user.signingkey", "gpg.format", "commit.gpgsign"):
+            for key in ("user.name", "user.email", "user.signingkey", "gpg.format", "commit.gpgsign", "gitcreate.precommit"):
                 value = cfg_get(local, key)
                 print(f"  {key:24} {value or '(not set locally)'}")
             print()
@@ -5973,7 +7038,10 @@ class App:
             print("  3) Set local signing key")
             print("  4) Set local commit.gpgsign")
             print("  5) Set local gpg.format ssh")
-            print("  6) Remove a local override")
+            print("  6) Set local pre-commit command")
+            print("  7) Remove a local override")
+            print("  8) Install the git-create pre-commit hook")
+            print("  9) Remove the git-create pre-commit hook")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -6001,7 +7069,22 @@ class App:
                 if confirm("Set local gpg.format=ssh?", True):
                     set_local_config(path, "gpg.format", "ssh")
             elif choice == "6":
-                keys = [key for key in ("user.name", "user.email", "user.signingkey", "gpg.format", "commit.gpgsign") if key in local]
+                command = ask("Pre-commit command (run with sh -c)", default=cfg_get(local, "gitcreate.precommit") or None)
+                if confirm(f"Set local pre-commit command to: {command}", True):
+                    set_local_config(path, "gitcreate.precommit", command)
+            elif choice == "7":
+                keys = [
+                    key
+                    for key in (
+                        "user.name",
+                        "user.email",
+                        "user.signingkey",
+                        "gpg.format",
+                        "commit.gpgsign",
+                        "gitcreate.precommit",
+                    )
+                    if key in local
+                ]
                 if not keys:
                     info("No local overrides are set.")
                     continue
@@ -6012,6 +7095,18 @@ class App:
                     continue
                 if confirm(f"Remove local {key}?", True):
                     unset_local_config(path, key)
+            elif choice == "8":
+                explain(
+                    "Installs a .git/hooks/pre-commit script that reads gitcreate.precommit.",
+                    "The hook runs the command automatically for commits made by any Git client, "
+                    "not only this app.",
+                    "An existing unrelated hook is never overwritten. Remove the hook with option 9.",
+                )
+                if confirm("Install the managed pre-commit hook?", True):
+                    install_precommit_hook(path)
+            elif choice == "9":
+                if confirm("Remove the git-create-managed pre-commit hook?", True):
+                    remove_precommit_hook(path)
             else:
                 warning("Unknown option.")
 
@@ -6265,6 +7360,7 @@ class App:
             print("  1) gh auth login")
             print("  2) Refresh with admin:ssh_signing_key scope")
             print("  3) Show gh auth status")
+            print("  4) Switch active GitHub account")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -6281,6 +7377,11 @@ class App:
                 run_interactive([gh, "auth", "refresh", "-h", "github.com", "-s", "admin:ssh_signing_key"])
             elif choice == "3":
                 print(run_cmd([gh, "auth", "status", "--hostname", "github.com"], timeout=12).combined)
+            elif choice == "4":
+                if not sys.stdin.isatty():
+                    info("Run in a terminal: gh auth switch --hostname github.com")
+                    continue
+                run_interactive([gh, "auth", "switch", "--hostname", "github.com"])
 
     def apply_recommended_settings(self) -> None:
         config = read_global_config()
@@ -6387,7 +7488,8 @@ class App:
             print("  4) Create .editorconfig")
             print("  5) Generate .env.example from .env (blank values only)")
             print("  6) Create .gitattributes")
-            print("  7) Create all safe missing files")
+            print("  7) Create LICENSE (MIT/ISC/BSD-3)")
+            print("  8) Create all safe missing files")
             print("  0) Back")
             print(col("  Dockerfile and GHCR workflow: use option 16.", "dim"))
             choice = ask("Choose an option", default="0", allow_empty=True)
@@ -6407,6 +7509,8 @@ class App:
             elif choice == "6":
                 changed = ensure_gitattributes(path)
             elif choice == "7":
+                changed = ensure_license(path)
+            elif choice == "8":
                 changed = ensure_gitignore(path) or changed
                 changed = ensure_readme(path) or changed
                 if dockerfile_present(path):
@@ -6790,6 +7894,57 @@ def scan_repositories(root: Path, max_depth: int = DEFAULT_DEPTH) -> List[Dict[s
     return results
 
 
+def collect_repo_info(root: Path) -> Dict[str, object]:
+    entries = status_entries(root)
+    counts = status_counts(entries)
+    branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+    upstream = git_out(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    worktrees: List[Dict[str, object]] = []
+    current: Dict[str, object] = {}
+    for line in git_out(root, "worktree", "list", "--porcelain").splitlines() + [""]:
+        if not line:
+            if current.get("path"):
+                worktrees.append(current)
+            current = {}
+        elif " " in line:
+            key, value = line.split(" ", 1)
+            if key in ("worktree", "HEAD", "branch"):
+                current["path" if key == "worktree" else key] = value
+            elif key in ("bare", "detached", "locked", "prunable"):
+                current[key] = True
+    submodules = [
+        line
+        for line in git_out(root, "submodule", "status", "--recursive").splitlines()
+        if line.strip()
+    ]
+    stashes = [
+        line
+        for line in git_out(root, "stash", "list").splitlines()
+        if line.strip()
+    ]
+    return {
+        "path": str(root),
+        "branch": branch or None,
+        "detached": not bool(branch),
+        "upstream": upstream or None,
+        "status": {
+            "staged": counts["staged"],
+            "unstaged": counts["unstaged"],
+            "untracked": counts["untracked"],
+            "conflicts": counts["conflicts"],
+            "clean": not bool(entries),
+        },
+        "remotes": remote_urls(root),
+        "local_branches": local_branch_names(root),
+        "remote_branches": remote_branch_names(root),
+        "tags": tag_names(root),
+        "stashes": stashes,
+        "worktrees": worktrees,
+        "submodules": submodules,
+        "last_commit": git_out(root, "log", "-1", "--format=%h %s"),
+    }
+
+
 def quick_repo_info(path: Path) -> Optional[Dict[str, object]]:
     root = detect_git_root(path)
     if root is None or root != path.resolve():
@@ -6888,6 +8043,127 @@ def cli_check(args: argparse.Namespace) -> int:
     return 0
 
 
+def collect_github_audit(root: Path) -> Dict[str, object]:
+    parsed = parse_github_url(remote_urls(root).get("origin", ""))
+    if not parsed:
+        return {"error": "No GitHub origin remote found"}
+    owner, repo = parsed
+    branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
+    if not branch:
+        return {"error": "Detached HEAD"}
+    gh = which_gh()
+    if not gh:
+        return {"error": "gh is not installed", "owner": owner, "repo": repo, "branch": branch}
+    endpoint = f"repos/{owner}/{repo}/branches/{quote(branch, safe='')}/protection"
+    protection = run_cmd([gh, "api", endpoint], cwd=root, timeout=60)
+    secrets_result = run_cmd(
+        [gh, "api", f"repos/{owner}/{repo}/actions/secrets", "--jq", ".secrets[].name"],
+        cwd=root,
+        timeout=60,
+    )
+    runs_result = run_cmd(
+        [gh, "run", "list", "--limit", "10", "--json", "databaseId,status,conclusion,displayTitle,workflowName,url"],
+        cwd=root,
+        timeout=60,
+    )
+    ghcr_result = run_cmd(
+        [gh, "run", "list", "--workflow", "ghcr.yml", "--limit", "5", "--json", "databaseId,status,conclusion,displayTitle,url"],
+        cwd=root,
+        timeout=60,
+    )
+    def parse_json(result: CmdResult) -> object:
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.out)
+        except json.JSONDecodeError:
+            return None
+    return {
+        "owner": owner,
+        "repo": repo,
+        "branch": branch,
+        "branch_protection": parse_json(protection) if protection.returncode == 0 else None,
+        "branch_protection_error": None if protection.returncode == 0 else one_line(protection.combined, 200),
+        "actions_secret_names": [
+            line for line in secrets_result.out.splitlines() if line.strip()
+        ] if secrets_result.returncode == 0 else [],
+        "actions_secrets_error": None if secrets_result.returncode == 0 else one_line(secrets_result.combined, 200),
+        "workflow_runs": parse_json(runs_result) or [],
+        "ghcr_runs": parse_json(ghcr_result) or [],
+    }
+
+
+def cli_audit(args: argparse.Namespace) -> int:
+    path = ask_path_from_arg(args.path)
+    root = detect_git_root(path)
+    if root is None:
+        message = f"Not a Git repository: {path}"
+        if args.json:
+            print(json.dumps({"error": message}, indent=2))
+        else:
+            failure(message)
+        return 2
+    data = collect_github_audit(root)
+    data.update({"app": APP, "version": VERSION, "path": str(root)})
+    error = data.get("error")
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 1 if error else 0
+    else:
+        heading(f"GitHub audit: {root}")
+        if error:
+            failure(str(error))
+            return 1
+        print(f"  Repository: {data['owner']}/{data['repo']}  Branch: {data['branch']}")
+        if data["branch_protection"] is not None:
+            success("Branch protection is enabled.")
+        else:
+            warning("Branch protection is not readable or not enabled.")
+            info(str(data["branch_protection_error"] or "unknown error"))
+        if data["actions_secret_names"]:
+            info("Actions secret names: " + ", ".join(data["actions_secret_names"]))
+        elif data["actions_secrets_error"]:
+            warning("Could not read Actions secret names: " + str(data["actions_secrets_error"]))
+        else:
+            info("No Actions repository secrets found.")
+        runs = data["workflow_runs"]
+        print(f"  Recent workflow runs: {len(runs) if isinstance(runs, list) else 0}")
+        ghcr = data["ghcr_runs"]
+        print(f"  GHCR workflow runs: {len(ghcr) if isinstance(ghcr, list) else 0}")
+    return 0
+
+
+def cli_info(args: argparse.Namespace) -> int:
+    path = ask_path_from_arg(args.path)
+    root = detect_git_root(path)
+    if root is None:
+        message = f"Not a Git repository: {path}"
+        if args.json:
+            print(json.dumps({"error": message}, indent=2))
+        else:
+            failure(message)
+        return 2
+    data = collect_repo_info(root)
+    data.update({"app": APP, "version": VERSION})
+    if args.json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+    else:
+        heading(f"Repository information: {root}")
+        print(f"  Branch: {data['branch'] or '(detached)'}")
+        print(f"  Upstream: {data['upstream'] or '(not set)'}")
+        status = data["status"]
+        print(
+            f"  Status: {'clean' if status['clean'] else 'dirty'} "
+            f"(staged={status['staged']}, unstaged={status['unstaged']}, "
+            f"untracked={status['untracked']}, conflicts={status['conflicts']})"
+        )
+        print("  Remotes: " + (", ".join(data["remotes"]) if data["remotes"] else "(none)"))
+        print("  Local branches: " + ", ".join(data["local_branches"]))
+        print("  Tags: " + (", ".join(data["tags"]) if data["tags"] else "(none)"))
+        print(f"  Worktrees: {len(data['worktrees'])}  Submodules: {len(data['submodules'])}  Stashes: {len(data['stashes'])}")
+    return 0
+
+
 def cli_scan(args: argparse.Namespace) -> int:
     root = ask_path_from_arg(args.path)
     if not root.exists() or not root.is_dir():
@@ -6969,10 +8245,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=APP,
         description="Safe menu-driven Git/GitHub project assistant. Run without arguments for the menu.",
-        epilog="Examples: git-create check --offline; git-create scan ~/Projects --depth 3; git-create secrets .",
+        epilog="Examples: git-create check --offline; git-create info --json; git-create audit --json; git-create scan ~/Projects --depth 3; git-create secrets .",
     )
     parser.add_argument("--version", action="version", version=f"{APP} {VERSION}")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colors")
+    parser.add_argument("--dry-run", action="store_true", help="show worktree/submodule/remote/backup commands without executing them")
     parser.add_argument("--debug", action="store_true", help="show Python tracebacks on unexpected errors")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -6982,6 +8259,16 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser.add_argument("--json", action="store_true", help="machine-readable output")
     check_parser.add_argument("--strict", action="store_true", help="exit non-zero on warnings too")
     check_parser.set_defaults(func=cli_check)
+
+    audit_parser = subparsers.add_parser("audit", help="read-only GitHub protection/secret/workflow audit")
+    audit_parser.add_argument("path", nargs="?", default=".", help="repository path (default: current directory)")
+    audit_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    audit_parser.set_defaults(func=cli_audit)
+
+    info_parser = subparsers.add_parser("info", help="show repository state as text or JSON")
+    info_parser.add_argument("path", nargs="?", default=".", help="repository path (default: current directory)")
+    info_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    info_parser.set_defaults(func=cli_info)
 
     scan_parser = subparsers.add_parser("scan", help="find Git repositories under a folder")
     scan_parser.add_argument("path", nargs="?", default=".", help="folder to scan (default: current directory)")
@@ -6996,7 +8283,7 @@ def build_parser() -> argparse.ArgumentParser:
     secrets_parser.add_argument("--max-blobs", type=int, default=2000, help="maximum unique blobs to scan (default: 2000)")
     secrets_parser.set_defaults(func=cli_secrets)
 
-    for subparser in (check_parser, scan_parser, secrets_parser):
+    for subparser in (check_parser, audit_parser, info_parser, scan_parser, secrets_parser):
         subparser.add_argument(
             "--no-color",
             action="store_true",
@@ -7021,7 +8308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         if getattr(args, "func", None):
             return int(args.func(args))
-        return App().run()
+        return App(dry_run=getattr(args, "dry_run", False)).run()
     except KeyboardInterrupt:
         print("\nCancelled.")
         return 130
