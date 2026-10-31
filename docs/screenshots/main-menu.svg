@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="992" viewBox="0 0 1100 992" role="img" aria-labelledby="title desc">
-<title id="title">git-create 1.4.1  ·  ~/Projects/demo-project</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1036" viewBox="0 0 1100 1036" role="img" aria-labelledby="title desc">
+<title id="title">git-create 1.5.0  ·  ~/Projects/demo-project</title>
 <desc id="desc">Terminal screenshot of the git-create menu-driven Git assistant.</desc>
 <rect width="100%" height="100%" fill="#010409"/>
-<rect x="1" y="1" width="1098" height="990" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
+<rect x="1" y="1" width="1098" height="1034" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
 <rect x="1" y="1" width="1098" height="54" rx="12" fill="#161b22" stroke="#30363d" stroke-width="2"/>
 <rect x="1" y="40" width="1098" height="15" fill="#161b22" stroke="#161b22"/>
 <circle cx="30" cy="28" r="6" fill="#ff5f56"/>
 <circle cx="50" cy="28" r="6" fill="#ffbd2e"/>
 <circle cx="70" cy="28" r="6" fill="#27c93f"/>
-<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create 1.4.1  ·  ~/Projects/demo-project</text>
-<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">git-create 1.4.1 - safe Git/GitHub project assistant</text>
+<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create 1.5.0  ·  ~/Projects/demo-project</text>
+<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">git-create 1.5.0 - safe Git/GitHub project assistant</text>
 <text xml:space="preserve" x="28" y="106" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Active project: ~/Projects/demo-project</text>
 <text xml:space="preserve" x="28" y="128" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">New to Git? Option 12 explains the concepts, commands, and why they are used.</text>
 <text xml:space="preserve" x="28" y="150" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
@@ -46,7 +46,9 @@
 <text xml:space="preserve" x="28" y="832" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  18) Merge/rebase: guided operations and conflict recovery</text>
 <text xml:space="preserve" x="28" y="854" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  19) Tags/releases: create, sign, push, delete, GitHub release</text>
 <text xml:space="preserve" x="28" y="876" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  20) Repository inspector: status/diffs/log/file history</text>
-<text xml:space="preserve" x="28" y="898" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   0) Exit</text>
-<text xml:space="preserve" x="28" y="920" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
-<text xml:space="preserve" x="28" y="942" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Choose an option [0]: </text>
+<text xml:space="preserve" x="28" y="898" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  21) GitHub collaboration: PRs, issues, reviews</text>
+<text xml:space="preserve" x="28" y="920" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  22) Remotes: list/add/edit/rename/remove/prune</text>
+<text xml:space="preserve" x="28" y="942" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">   0) Exit</text>
+<text xml:space="preserve" x="28" y="964" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5"></text>
+<text xml:space="preserve" x="28" y="986" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Choose an option [0]: </text>
 </svg>

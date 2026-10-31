@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.4.1**.
+Current version: **1.5.0**.
 
 ## Contents
 
@@ -31,6 +31,8 @@ Current version: **1.4.1**.
 - [Tags and releases](#tags-and-releases)
 - [Repository inspector](#repository-inspector)
 - [Batch verification](#batch-verification)
+- [GitHub collaboration](#github-collaboration)
+- [Remotes](#remotes)
 - [Docker image and GHCR workflow](#docker-image-and-ghcr-workflow)
 - [Command line mode](#command-line-mode)
 - [Safety model](#safety-model)
@@ -188,6 +190,8 @@ Typical menu flow:
 8. Use **17** for stashes, **18** for guided merge/rebase, **19** for tags and
    GitHub releases, and **20** to inspect status, diffs, and history.
 9. In option **2**, enter `a` after a scan to verify every repository locally.
+10. Use **21** for pull requests, issues, and reviews, and **22** to manage
+    local remote names and URLs.
 
 The app never changes your global Git configuration or project files without
 showing a plan and asking for confirmation. The settings wizard, file templates,
@@ -239,11 +243,14 @@ explains the commands you will see.
 | Command | What it does | Why the app uses it |
 | --- | --- | --- |
 | `git config --global ...` | Reads or writes settings in your personal Git configuration. | Sets identity, safer defaults, and SSH signing once for all repositories. |
+| `git config --local ...` | Reads or writes settings inside this repository's `.git/config`. | Overrides global identity or signing policy for one project. |
 | `git init -b main` | Creates a new `.git` repository whose first branch is `main`. | Starts history for a local project without creating commits yet. |
 | `git status` | Shows changed, staged, and untracked files, plus branch state. | Helps you see exactly what would be committed. |
 | `git add` | Copies selected changes into the staging area. | Lets you review a precise snapshot before committing. |
 | `git diff --cached` | Shows the difference between the last commit and the staging area. | Verifies what the next commit will contain. |
 | `git commit` | Saves the staged snapshot as a history entry. | Creates a checkpoint that can be reviewed, signed, and pushed. |
+| `git commit --amend` | Replaces the last unpushed commit. | Fixes a message or includes forgotten staged changes without a second commit. |
+| `git add -p` | Stages selected hunks interactively. | Gives precise control over a commit. |
 | `git push` | Uploads local commits to the remote branch. | Shares history with GitHub and other clones. |
 | `git fetch` | Downloads remote refs and objects without changing your branch. | Lets you compare local and remote history safely. |
 | `git pull --ff-only` | Fetches and fast-forwards the branch only if no merge is needed. | Updates a branch without creating an accidental merge commit. |
@@ -257,6 +264,8 @@ explains the commands you will see.
 | `git rebase` | Replays local commits on a new base. | Produces linear history only when those commits are not shared. |
 | `git tag` | Creates, verifies, pushes, or deletes stable names for commits. | Marks releases and checkpoints without changing history. |
 | `gh release create` | Creates a GitHub release attached to a tag. | Adds release notes and download metadata to a version tag. |
+| `gh release upload` | Uploads a file to an existing release. | Distributes binaries or archives without changing Git history. |
+| `gh pr` / `gh issue` | Lists, views, or creates pull requests and issues; submits reviews. | Supports GitHub collaboration without merging or closing anything. |
 | `git remote -v` | Lists remote names and URLs. | Confirms where fetch and push will go. |
 | `git merge-base` | Finds the common ancestor of two histories. | Shows whether local and remote history are related. |
 | `git fsck` | Checks the integrity of the object database. | Detects missing or corrupt repository objects during deep verification. |
@@ -310,17 +319,19 @@ The command is printed after the explanation, immediately before execution.
 | `7` | **Scenario D**: fetch and diagnose local/remote history. Creates an optional local backup branch. Never force-pushes. |
 | `8` | Commit and push: review changes, stage all or selected paths, scan secrets, sign, commit, and push normally. |
 | `9` | Rename the local folder and/or the GitHub repository, and optionally commit/push pending changes. |
-| `10` | Check and fix global Git/GitHub settings, SSH signing, allowed signers, and `gh` authentication. |
+| `10` | Check/fix global Git/GitHub settings, SSH signing, allowed signers, and `gh` authentication; option 10 inside also edits repository-local identity/signing overrides. |
 | `11` | Check/add important project files: `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, and `.env.example`. |
 | `12` | Help, Git concepts, command explanations, and the scenario guide. |
 | `13` | Scan reachable Git history for common private-key and token patterns. |
 | `14` | Branch management: list, create, switch, rename, delete local/remote branches, set upstream, show branch graph. |
-| `15` | Undo/revert helpers: unstage, discard local edits with a backup patch, safe revert commits, soft-undo unpublished commits. |
+| `15` | Undo/revert helpers: unstage, discard local edits with a backup patch, safe revert commits, soft-undo unpublished commits, amend an unpublished commit. |
 | `16` | Create a starter Dockerfile, `.dockerignore`, and a GitHub Actions workflow that publishes to GHCR. |
 | `17` | Stash helpers: save, list, show, apply, pop, and drop local stashes. |
 | `18` | Guided merge/rebase with safety refs, conflict continue/abort, and no force-push. |
 | `19` | Tags/releases: annotated or signed tags, push/delete, and GitHub releases. |
 | `20` | Read-only repository inspector: status, staged/unstaged diffs, log, commit details, file history, remotes, branches, and tags. |
+| `21` | GitHub collaboration: list/view/create pull requests and issues, and submit PR reviews. |
+| `22` | Remotes: list, add, edit URL, rename, remove, and fetch with prune. |
 | `0` | Exit. |
 
 The defaults point at `~/Projects` when it exists. All paths are prompted, so
@@ -349,7 +360,7 @@ Choose **1** for the full verification. Full verification adds:
 - `git fsck` object connectivity
 - tracked **and untracked** content secret scanning
 - `.env` file permission checks
-- large-file checks
+- large-file informational checks (no app-imposed size limit)
 - Docker ignore coverage
 - commit signature status
 - linked-worktree detection
@@ -413,6 +424,19 @@ Reading the registered keys uses:
 ```bash
 gh api user/ssh_signing_keys
 ```
+
+### Repository-local overrides
+
+In the settings menu, option **10** edits overrides stored in `.git/config`:
+
+- local `user.name` and `user.email`
+- local `user.signingkey`
+- local `gpg.format=ssh`
+- local `commit.gpgsign=true/false`
+- removal of any of those local overrides
+
+Local settings affect only the active repository. The global settings wizard is
+not changed by local edits.
 
 ## Project files checked
 
@@ -548,7 +572,7 @@ links and other local clones should still be updated. No history is rewritten.
 Menu option **8**:
 
 1. Shows changed paths.
-2. Stages all files or a numbered selection.
+2. Stages all files, a numbered selection, or interactive hunks with `git add -p`.
 3. Refuses to continue if the index differs from the working tree, so the
    secret scan cannot approve different content from what will be committed.
 4. Scans staged filenames and content for private keys and common token
@@ -619,12 +643,13 @@ Menu option **15** separates local file recovery from Git history changes:
 | Discard unstaged edits | Working tree for selected tracked files | Writes a patch to `.git/git-create-backups/` first; requires typing `DISCARD` |
 | Revert a commit | Creates a new commit that reverses an old commit | Safe for shared history; can push normally; never force |
 | Undo last local commit | `git reset --soft HEAD^`, keeping changes staged | Fetches first, refuses if HEAD exists on a remote branch or tag, and creates a safety ref |
+| Amend last commit | Replaces the last unpushed commit and can add staged changes | Fetches first; refuses if HEAD is on a remote branch or tag; unstaged files are not included |
 
 “Revert both local and Git” therefore means:
 
 - **local file changes** are discarded with a backup patch and typed confirmation;
   the patch can be re-applied with `git apply <patch>`
-- **local unpublished Git history** can be soft-undone
+- **local unpublished Git history** can be soft-undone or amended
 - **remote/shared history** is reverted by a new revert commit, pushed normally,
   never by force-pushing rewritten history
 
@@ -677,6 +702,8 @@ Menu option **19** provides:
 - delete a local tag with a safety ref and typed confirmation
 - delete a remote origin tag with a typed confirmation
 - create a GitHub release from an existing tag using `gh`
+- upload release assets without overwriting existing assets
+- preview and optionally save a generated changelog between two refs
 
 Signed-tag creation uses the configured SSH signing key. A tag is local until
 pushed. The app never overwrites an existing local or remote tag and never
@@ -708,6 +735,36 @@ its local project checks against every repository found and prints:
 Batch verification includes tracked and untracked secret scanning, but it is
 local-only: it does not fetch, contact GitHub, or run `git fsck`. Run option 1
 on an individual repository for deep verification.
+
+## GitHub collaboration
+
+Menu option **21** uses authenticated `gh` commands for:
+
+- listing and viewing pull requests
+- creating a pull request from the current branch after it has an upstream
+- listing and viewing issues
+- creating issues
+- submitting PR reviews: approve, comment, or request changes
+
+Reads are safe. Creating a PR, issue, or review publishes an action under your
+GitHub account and requires confirmation. The menu does not merge, close,
+delete, or dismiss anything. It requires a GitHub `origin` and authenticated
+`gh`.
+
+## Remotes
+
+Menu option **22** manages local remote configuration:
+
+- list remotes
+- add a remote
+- change a remote URL
+- rename a remote
+- remove a local remote with a typed confirmation
+- fetch with prune
+
+Removing or renaming a remote changes only local names, URLs, and tracking refs.
+It never deletes a remote repository or branch. URLs containing embedded
+credentials are refused; use SSH or `gh` authentication instead.
 
 ## Docker image and GHCR workflow
 
@@ -757,8 +814,9 @@ the app creates before running it.
 ## Command line mode
 
 The menu is the primary interface. Branch, stash, merge/rebase, tag/release,
-undo/revert, inspector, and Docker/GHCR actions are interactive menu actions.
-Non-interactive checks and scans are available for scripts and CI:
+undo/revert, inspector, GitHub collaboration, remote, local-config, and
+Docker/GHCR actions are interactive menu actions. Non-interactive checks and
+scans are available for scripts and CI:
 
 ```bash
 git-create check [PATH] [--offline] [--json] [--strict]
@@ -863,17 +921,31 @@ dedicated tool.
 - Publish, push, and scenario D flows expect a remote named `origin`. Other
   remote names are inspected and reported, but are not used automatically.
 
+### Git push and file size
+
+Git itself does not impose a universal file-size or push-size limit. The local
+`git push` command sends whatever the remote accepts. The app does **not**
+impose its own size limit and does not block large files; it reports large
+tracked files as informational.
+
+The **remote** can still reject a push:
+
+- GitHub warns when a file exceeds 50 MiB and rejects files around 100 MiB.
+- GitHub may reject unusually large pushes or repositories depending on account
+  and repository limits.
+- Self-hosted remotes have their own server, proxy, and storage limits.
+
+If a remote rejects a large file, use Git LFS or split the content. The app’s
+secret scanners have separate read limits (1 MiB per working-tree file, 2 MiB
+per history blob) to keep scans bounded; those limits do not restrict Git.
+
 ## What the app does not do
 
 The menu intentionally focuses on safe setup, verification, publishing,
 branching, recovery, and container publishing. It does **not** currently
 provide:
 
-- commit amend or interactive hunk staging
-- changelog generation or release-asset uploads
-- pull requests, issues, reviews, or GitHub organization management
-- generic remote add/remove/edit outside the publish-existing flow
-- editing repository-local identity/signing config (the app reports overrides)
+- GitHub organization management or team permissions
 - creating or managing linked worktrees or submodules
 - a pre-commit test/lint runner
 - Git LFS setup or migration
@@ -897,7 +969,7 @@ Network activity only happens when you choose an action that needs it:
 
 - `git fetch`, `git pull`, `git push`, and `git ls-remote`
 - `gh` authentication, repository creation/cloning/renaming, release creation,
-  and GitHub API reads
+  pull-request/issue/review actions, and GitHub API reads
 - optional GitHub signing-key registration checks
 
 Local checks, scans, settings inspection, and history scanning do not use the
@@ -1019,6 +1091,22 @@ discard the changes for you.
 Git left the revert in progress. Resolve the conflicted files and run
 `git revert --continue`, or run `git revert --abort` to stop deliberately.
 The app reports the failure and does not force a result.
+
+### Amend was refused
+
+The last commit is already on a remote branch or tag. Amending it would rewrite
+shared history and require a force push. Make a new commit, or use a revert
+commit if you need to undo the change.
+
+### Pull request creation says the branch has no upstream
+
+Push the branch first with option 8, then retry option 21. The app does not
+silently push or create an upstream for a PR.
+
+### Release asset upload failed
+
+The release asset may already exist; the app never uses `--clobber`. Confirm the
+release exists on GitHub and that your `gh` token can manage releases.
 
 ### A merge or rebase conflicted
 

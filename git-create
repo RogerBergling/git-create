@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 APP = "git-create"
-VERSION = "1.4.1"
+VERSION = "1.5.0"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -963,6 +963,30 @@ def set_global_config(key: str, value: str, add: bool = False) -> bool:
         success(f"set {key} = {value}")
         return True
     failure(f"could not set {key}: {one_line(result.combined)}")
+    return False
+
+
+def set_local_config(root: Path, key: str, value: str) -> bool:
+    result = run_cmd(
+        ["git", "-C", str(root), "config", "--local", "--replace-all", key, value],
+        timeout=10,
+    )
+    if result.returncode == 0:
+        success(f"set local {key} = {value}")
+        return True
+    failure(f"could not set local {key}: {one_line(result.combined)}")
+    return False
+
+
+def unset_local_config(root: Path, key: str) -> bool:
+    result = run_cmd(
+        ["git", "-C", str(root), "config", "--local", "--unset-all", key],
+        timeout=10,
+    )
+    if result.returncode in (0, 5):
+        success(f"removed local {key}")
+        return True
+    failure(f"could not remove local {key}: {one_line(result.combined)}")
     return False
 
 
@@ -2585,24 +2609,15 @@ def build_project_report(
             )
 
     large_files = large_tracked_files(root, tracked)
-    very_large = [(name, size) for name, size in large_files if size >= 95 * 1024 * 1024]
-    large = [(name, size) for name, size in large_files if 50 * 1024 * 1024 <= size < 95 * 1024 * 1024]
-    if very_large:
+    large = [(name, size) for name, size in large_files if size >= 50 * 1024 * 1024]
+    if large:
         safety.checks.append(
             Check(
-                "FAIL",
-                "GitHub file-size limit",
-                ", ".join(f"{name} ({format_size(size)})" for name, size in very_large[:5]),
-                "GitHub rejects files of 100 MiB or more. Use Git LFS or remove the file from history.",
-            )
-        )
-    elif large:
-        safety.checks.append(
-            Check(
-                "WARN",
+                "INFO",
                 "Large tracked files",
                 ", ".join(f"{name} ({format_size(size)})" for name, size in large[:5]),
-                "GitHub warns above 50 MiB. Consider Git LFS, and never commit generated binaries casually.",
+                "The app imposes no file or Git-push size limit. The remote may still reject "
+                "large files; GitHub commonly warns above 50 MiB and rejects files near 100 MiB.",
             )
         )
     else:
@@ -2986,6 +3001,8 @@ class App:
                     "18": self.merge_rebase_action,
                     "19": self.tags_action,
                     "20": self.inspector_action,
+                    "21": self.github_collab_action,
+                    "22": self.remotes_action,
                 }
                 action = actions.get(choice)
                 if action is None:
@@ -3042,6 +3059,8 @@ class App:
             ("18", "Merge/rebase: guided operations and conflict recovery"),
             ("19", "Tags/releases: create, sign, push, delete, GitHub release"),
             ("20", "Repository inspector: status/diffs/log/file history"),
+            ("21", "GitHub collaboration: PRs, issues, reviews"),
+            ("22", "Remotes: list/add/edit/rename/remove/prune"),
             ("0", "Exit"),
         ]
         for number, label in items:
@@ -3246,6 +3265,14 @@ class App:
                 Inspector (option 20)
                    Read-only status, staged/unstaged diffs, log graph, commit
                    details, file history, remotes, branches, tags, and upstream.
+
+                GitHub collaboration (option 21)
+                   Lists/views/creates pull requests and issues, and submits PR
+                   reviews through authenticated gh. Does not merge or close.
+
+                Remotes (option 22)
+                   Lists, adds, changes, renames, removes, and prunes local
+                   remote names/URLs. Never deletes anything on the server.
 
                 Scan (option 2)
                    After scanning, 'a' runs local verification on every repository
@@ -3493,6 +3520,7 @@ class App:
             print("  3) Discard unstaged changes to selected tracked files (backup first)")
             print("  4) Revert a commit with a new commit (safe for shared history)")
             print("  5) Undo the last local commit, keep changes (only if never pushed)")
+            print("  6) Amend the last local commit (never if already pushed)")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -3554,8 +3582,75 @@ class App:
                 self.revert_commit(path)
             elif choice == "5":
                 self.undo_last_local_commit(path)
+            elif choice == "6":
+                self.amend_last_commit(path)
             else:
                 warning("Unknown option.")
+
+    def amend_last_commit(self, path: Path) -> None:
+        if not git_out(path, "symbolic-ref", "--short", "-q", "HEAD"):
+            failure("Detached HEAD; check out a branch before amending.")
+            return
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        if git(path, "rev-parse", "--verify", "--quiet", "HEAD").returncode != 0:
+            failure("There is no commit to amend.")
+            return
+        if remote_urls(path):
+            if not confirm("Fetch remotes first to verify this commit was never pushed?", True):
+                return
+            fetch = run_cmd(
+                ["git", "fetch", "--all", "--prune"],
+                cwd=path,
+                timeout=120,
+                env_extra=remote_env(),
+            )
+            if fetch.returncode != 0:
+                failure("Fetch failed; cannot prove the commit is unpublished, so amend was cancelled.")
+                return
+        remote_contains = git_out(path, "branch", "-r", "--contains", "HEAD")
+        tag_contains = git_out(path, "tag", "--contains", "HEAD")
+        if remote_contains or tag_contains:
+            failure("HEAD is contained in a remote branch or tag; amending would rewrite shared history.")
+            info("Create a new commit instead, or use a revert commit for pushed history.")
+            return
+        staged = git_out(path, "diff", "--cached", "--name-only")
+        current_subject = git_out(path, "log", "-1", "--format=%s")
+        explain(
+            "Runs git commit --amend. The last local commit is replaced by a new commit.",
+            "Amending fixes the last commit message or adds staged changes to it without creating "
+            "a second commit.",
+            "It is refused if HEAD exists on a remote branch or tag. Unstaged changes are not "
+            "included; only staged content and the message are amended.",
+        )
+        if staged:
+            info(f"Staged paths that will be added: {staged}")
+        else:
+            info("No staged changes; only the commit message will change.")
+        message = ask(
+            "Amended commit message (leave empty to open editor)",
+            default=current_subject,
+            allow_empty=True,
+        )
+        if not message and not sys.stdin.isatty():
+            failure("A message or interactive editor is required.")
+            return
+        print("Command: " + col("git commit --amend" + (f" -m {shlex.quote(message)}" if message else ""), "dim"))
+        if not confirm("Amend the last commit?", True):
+            return
+        if message:
+            result = run_cmd(["git", "commit", "--amend", "-m", message], cwd=path, timeout=180)
+            if result.combined:
+                print(result.combined)
+            code = result.returncode
+        else:
+            code = run_interactive(["git", "commit", "--amend"], cwd=path)
+        if code == 0:
+            success("Last commit amended.")
+            info("No push was attempted. A normal push may be rejected if the old commit exists on the remote.")
+        else:
+            failure("Amend failed; the original commit remains as HEAD.")
 
     def revert_commit(self, path: Path) -> None:
         if in_progress_operations(path):
@@ -4019,6 +4114,8 @@ class App:
             print("  5) Delete a local tag")
             print("  6) Delete a remote origin tag")
             print("  7) Create a GitHub release from a tag")
+            print("  8) Upload a release asset")
+            print("  9) Generate a changelog preview")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -4058,8 +4155,77 @@ class App:
                 self.delete_remote_tag(path)
             elif choice == "7":
                 self.create_github_release(path)
+            elif choice == "8":
+                self.upload_release_asset(path)
+            elif choice == "9":
+                self.show_changelog(path)
             else:
                 warning("Unknown option.")
+
+    def upload_release_asset(self, path: Path) -> None:
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        tag = ask("Release tag")
+        if tag not in tag_names(path):
+            failure(f"Local tag not found: {tag}")
+            return
+        filename = ask("Asset file path")
+        asset = Path(os.path.expanduser(filename))
+        if not asset.is_absolute():
+            asset = path / asset
+        if not asset.is_file():
+            failure(f"Asset file not found: {asset}")
+            return
+        command = [which_gh() or "gh", "release", "upload", tag, str(asset)]
+        explain(
+            f"Runs gh release upload {tag} <asset>. The file is attached to an existing "
+            "GitHub release.",
+            "Release assets distribute binaries, archives, or documentation alongside a tag.",
+            "The app does not use --clobber: an existing asset with the same name is not "
+            "overwritten. The file is sent to GitHub; no Git history changes.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm(f"Upload '{asset.name}' to release '{tag}'?", True):
+            return
+        result = run_cmd(command, cwd=path, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Uploaded {asset.name}.")
+        else:
+            failure("Release asset upload failed. No existing asset was overwritten.")
+
+    def show_changelog(self, path: Path) -> None:
+        end = ask("End ref (tag/commit)", default="HEAD")
+        if git(path, "rev-parse", "--verify", "--quiet", f"{end}^{{commit}}").returncode != 0:
+            failure(f"Unknown end ref: {end}")
+            return
+        previous = git_out(path, "describe", "--tags", "--abbrev=0", f"{end}^")
+        start = ask("Start ref (exclusive; leave empty for all history)", default=previous, allow_empty=True)
+        if start:
+            if git(path, "rev-parse", "--verify", "--quiet", f"{start}^{{commit}}").returncode != 0:
+                failure(f"Unknown start ref: {start}")
+                return
+            revision_range = f"{start}..{end}"
+        else:
+            revision_range = end
+        result = git(
+            path,
+            "log",
+            "--no-merges",
+            "--date=short",
+            "--pretty=format:- %s (%h, %ad)",
+            revision_range,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            failure("Could not generate changelog.")
+            return
+        text = result.out.strip()
+        heading(f"Changelog: {revision_range}")
+        print(text or "(no commits in that range)")
+        if text and confirm("Save this as CHANGELOG.generated.md?", False):
+            write_new_file(path / "CHANGELOG.generated.md", text + "\n", "generated changelog")
 
     def create_tag(self, path: Path) -> None:
         name = ask("Tag name (for example v1.2.3)")
@@ -4257,6 +4423,112 @@ class App:
             success(f"GitHub release '{tag}' created.")
         else:
             failure("GitHub release creation failed.")
+
+    def remotes_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "Remotes are named URLs for other copies of the repository, usually origin on "
+            "GitHub.",
+            "This menu lists, adds, edits, renames, removes, and prunes remotes without "
+            "changing commits or deleting anything on the remote server.",
+            "Removing a remote only removes the local name and tracking refs. It does not "
+            "delete the remote repository or branches.",
+        )
+        while True:
+            heading("Remotes")
+            print(git_out(path, "remote", "-v") or "  (no remotes)")
+            print()
+            print("  1) List remotes")
+            print("  2) Add a remote")
+            print("  3) Change a remote URL")
+            print("  4) Rename a remote")
+            print("  5) Remove a local remote")
+            print("  6) Fetch with prune for a remote")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            remotes = remote_urls(path)
+            if choice == "1":
+                print(git_out(path, "remote", "-v") or "No remotes.")
+            elif choice in ("2", "3", "4", "5", "6"):
+                if choice == "2":
+                    name = ask("New remote name", default="origin")
+                    if not re.fullmatch(r"[A-Za-z0-9._-]+", name) or name in remotes:
+                        failure("Use a new remote name with letters, numbers, dot, dash, or underscore.")
+                        continue
+                    url = ask("Remote URL")
+                    if not url or url.startswith("-"):
+                        failure("A valid URL is required.")
+                        continue
+                    if re.match(r"^https?://[^/@\s]+@", url):
+                        failure("Refusing to store credentials in a remote URL. Use SSH or gh authentication.")
+                        continue
+                    command = ["git", "remote", "add", name, url]
+                    why = "Adds a name and URL to .git/config. Git does not contact the remote yet."
+                elif choice == "3":
+                    name = ask("Remote to edit", default="origin" if "origin" in remotes else "")
+                    if name not in remotes:
+                        failure(f"Unknown remote: {name}")
+                        continue
+                    url = ask("New remote URL")
+                    if not url or url.startswith("-"):
+                        failure("A valid URL is required.")
+                        continue
+                    if re.match(r"^https?://[^/@\s]+@", url):
+                        failure("Refusing to store credentials in a remote URL.")
+                        continue
+                    command = ["git", "remote", "set-url", name, url]
+                    why = "Changes only the stored URL; branches, commits, and the server are untouched."
+                elif choice == "4":
+                    old = ask("Remote to rename", default="origin" if "origin" in remotes else "")
+                    if old not in remotes:
+                        failure(f"Unknown remote: {old}")
+                        continue
+                    new = ask("New remote name")
+                    if not re.fullmatch(r"[A-Za-z0-9._-]+", new) or new in remotes:
+                        failure("Use a new remote name with letters, numbers, dot, dash, or underscore.")
+                        continue
+                    command = ["git", "remote", "rename", old, new]
+                    why = "Renames the local remote and updates tracking refs/config. The server is untouched."
+                elif choice == "5":
+                    name = ask("Remote to remove", default="origin" if "origin" in remotes else "")
+                    if name not in remotes:
+                        failure(f"Unknown remote: {name}")
+                        continue
+                    phrase = f"REMOVE REMOTE {name}"
+                    typed = ask(f'Type "{phrase}" to remove the local remote', allow_empty=True)
+                    if typed != phrase:
+                        info("Remote removal cancelled.")
+                        continue
+                    command = ["git", "remote", "remove", name]
+                    why = "Removes the local remote name and tracking refs. The remote server and branches remain."
+                else:
+                    name = ask("Remote to fetch with prune", default="origin" if "origin" in remotes else "")
+                    if name not in remotes:
+                        failure(f"Unknown remote: {name}")
+                        continue
+                    command = ["git", "fetch", "--prune", name]
+                    why = "Downloads remote updates and removes stale remote-tracking refs; local branches are untouched."
+                explain(
+                    "Runs " + shlex.join(command) + ".",
+                    why,
+                    "No force is used. Remote servers are never rewritten by this menu.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Run this remote operation?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=120 if choice == "6" else 30, env_extra=remote_env() if choice == "6" else None)
+                if result.combined:
+                    print(result.combined)
+                if result.returncode == 0:
+                    success("Remote configuration updated.")
+                else:
+                    failure("Remote operation failed.")
+            else:
+                warning("Unknown option.")
 
     def inspector_action(self) -> None:
         path = self.require_project()
@@ -4640,6 +4912,151 @@ class App:
             success(f"Upstream for '{current}' is now '{target}'.")
         else:
             failure("Could not set upstream.")
+
+    def github_collab_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        origin = remote_urls(path).get("origin", "")
+        if not parse_github_url(origin):
+            failure("No GitHub origin remote found. This menu supports github.com repositories only.")
+            return
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        explain(
+            "This menu uses authenticated gh commands for pull requests, issues, and reviews.",
+            "Collaboration happens on GitHub, not in local Git history. Reads are safe; creating "
+            "a PR, issue, or review publishes an action under your account.",
+            "Every write is confirmed first. The app does not merge, close, or delete anything "
+            "from this menu.",
+        )
+        while True:
+            heading("GitHub collaboration")
+            print("  1) List pull requests")
+            print("  2) View a pull request")
+            print("  3) Create a pull request")
+            print("  4) List issues")
+            print("  5) View an issue")
+            print("  6) Create an issue")
+            print("  7) Review a pull request")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            gh = which_gh() or "gh"
+            if choice == "1":
+                result = run_cmd([gh, "pr", "list", "--limit", "20"], cwd=path, timeout=60)
+                print(result.combined or "(no pull requests)")
+            elif choice == "2":
+                number = ask("Pull request number")
+                if not number.isdigit():
+                    failure("Enter a numeric pull request number.")
+                    continue
+                result = run_cmd([gh, "pr", "view", number], cwd=path, timeout=60)
+                print(result.combined)
+            elif choice == "3":
+                current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+                if not current:
+                    failure("Detached HEAD; check out a branch first.")
+                    continue
+                upstream = git_out(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+                if not upstream:
+                    failure("Current branch has no upstream. Push it first with option 8.")
+                    continue
+                base_default = remote_default_branch(path) or "main"
+                base = ask("Base branch", default=base_default)
+                if base == current:
+                    failure("Base and head branch must differ.")
+                    continue
+                title = ask("Pull request title")
+                body = ask("Pull request body (optional)", allow_empty=True)
+                command = [gh, "pr", "create", "--base", base, "--head", current, "--title", title]
+                if body:
+                    command.extend(["--body", body])
+                else:
+                    command.extend(["--body", ""])
+                explain(
+                    f"Runs gh pr create from '{current}' into '{base}'.",
+                    "A pull request publishes a reviewable branch comparison on GitHub.",
+                    "The app does not merge the pull request. The repository and branch are "
+                    "unchanged until you act on GitHub.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Create this pull request?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=120)
+                print(result.combined)
+                if result.returncode == 0:
+                    success("Pull request created.")
+                else:
+                    failure("Pull request creation failed.")
+            elif choice == "4":
+                result = run_cmd([gh, "issue", "list", "--limit", "20"], cwd=path, timeout=60)
+                print(result.combined or "(no issues)")
+            elif choice == "5":
+                number = ask("Issue number")
+                if not number.isdigit():
+                    failure("Enter a numeric issue number.")
+                    continue
+                result = run_cmd([gh, "issue", "view", number], cwd=path, timeout=60)
+                print(result.combined)
+            elif choice == "6":
+                title = ask("Issue title")
+                body = ask("Issue body (optional)", allow_empty=True)
+                command = [gh, "issue", "create", "--title", title, "--body", body]
+                explain(
+                    "Runs gh issue create.",
+                    "An issue records a bug, task, or discussion on GitHub.",
+                    "The app does not close, edit, or delete issues.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Create this issue?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=120)
+                print(result.combined)
+                if result.returncode == 0:
+                    success("Issue created.")
+                else:
+                    failure("Issue creation failed.")
+            elif choice == "7":
+                number = ask("Pull request number")
+                if not number.isdigit():
+                    failure("Enter a numeric pull request number.")
+                    continue
+                review_type = ask("[a]pprove, [c]omment, or [r]equest changes", default="c").lower()
+                flags = {
+                    "a": "--approve",
+                    "approve": "--approve",
+                    "c": "--comment",
+                    "comment": "--comment",
+                    "r": "--request-changes",
+                    "request": "--request-changes",
+                    "request-changes": "--request-changes",
+                }
+                flag = flags.get(review_type)
+                if not flag:
+                    failure("Choose approve, comment, or request changes.")
+                    continue
+                body = ask("Review body (optional)", allow_empty=True)
+                command = [gh, "pr", "review", number, flag]
+                if body:
+                    command.extend(["--body", body])
+                explain(
+                    f"Runs gh pr review {number} {flag}.",
+                    "This submits a review under your GitHub account and may notify the author.",
+                    "The app does not merge, close, or dismiss reviews.",
+                )
+                print("Command: " + col(shlex.join(command), "dim"))
+                if not confirm("Submit this review?", True):
+                    continue
+                result = run_cmd(command, cwd=path, timeout=120)
+                print(result.combined)
+                if result.returncode == 0:
+                    success("Review submitted.")
+                else:
+                    failure("Review submission failed.")
+            else:
+                warning("Unknown option.")
 
     def docker_action(self) -> None:
         path = self.require_project()
@@ -5502,6 +5919,7 @@ class App:
             print("  7) GitHub authentication (login / refresh scope)")
             print("  8) Show raw global config")
             print("  9) Explain what every setting means and why")
+            print(" 10) Configure repository-local identity/signing")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
@@ -5525,6 +5943,75 @@ class App:
                 print(result.combined)
             elif choice == "9":
                 self.show_setting_help()
+            elif choice == "10":
+                self.local_config_action()
+            else:
+                warning("Unknown option.")
+
+    def local_config_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "Repository-local Git settings live in .git/config and override global settings "
+            "for this repository only.",
+            "Use them when a project needs a different author email, signing key, or commit "
+            "signing policy than the rest of your machine.",
+            "The app writes only the keys you choose locally. Global configuration is not modified.",
+        )
+        while True:
+            local = read_local_config(path)
+            effective_name, effective_email = effective_identity(path)
+            heading("Repository-local Git settings")
+            print(f"  Effective identity: {effective_name or '(missing)'} <{effective_email or '(missing)'}>")
+            for key in ("user.name", "user.email", "user.signingkey", "gpg.format", "commit.gpgsign"):
+                value = cfg_get(local, key)
+                print(f"  {key:24} {value or '(not set locally)'}")
+            print()
+            print("  1) Set local user.name")
+            print("  2) Set local user.email")
+            print("  3) Set local signing key")
+            print("  4) Set local commit.gpgsign")
+            print("  5) Set local gpg.format ssh")
+            print("  6) Remove a local override")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                value = ask("Local user.name", default=cfg_get(read_global_config(), "user.name") or None)
+                if confirm(f"Set local user.name to '{value}'?", True):
+                    set_local_config(path, "user.name", value)
+            elif choice == "2":
+                value = ask_email("Local user.email", default=cfg_get(read_global_config(), "user.email") or None)
+                if confirm(f"Set local user.email to '{value}'?", True):
+                    set_local_config(path, "user.email", value)
+            elif choice == "3":
+                key = self.choose_signing_key(read_global_config())
+                if key and confirm(f"Use {key} as this repository's signing key?", True):
+                    set_local_config(path, "user.signingkey", key)
+            elif choice == "4":
+                value = ask("Local commit.gpgsign [true/false]", default="true").lower()
+                if value not in ("true", "false"):
+                    failure("Choose true or false.")
+                    continue
+                if confirm(f"Set local commit.gpgsign={value}?", True):
+                    set_local_config(path, "commit.gpgsign", value)
+            elif choice == "5":
+                if confirm("Set local gpg.format=ssh?", True):
+                    set_local_config(path, "gpg.format", "ssh")
+            elif choice == "6":
+                keys = [key for key in ("user.name", "user.email", "user.signingkey", "gpg.format", "commit.gpgsign") if key in local]
+                if not keys:
+                    info("No local overrides are set.")
+                    continue
+                print("  Local overrides: " + ", ".join(keys))
+                key = ask("Key to remove")
+                if key not in keys:
+                    failure("Choose one of the listed keys.")
+                    continue
+                if confirm(f"Remove local {key}?", True):
+                    unset_local_config(path, key)
             else:
                 warning("Unknown option.")
 
@@ -6028,10 +6515,29 @@ def stage_changes(root: Path) -> bool:
     for index, entry in enumerate(entries, 1):
         print(f"  {index:>3}) {entry.display}")
     print()
-    mode = ask("Stage [a]ll, [s]elect, or [c]ancel", default="a").lower()
+    mode = ask("Stage [a]ll, [s]elect, [p]atch, or [c]ancel", default="a").lower()
     if mode in ("c", "cancel", "n", "no"):
         info("Cancelled; nothing was staged.")
         return False
+    if mode in ("p", "patch", "interactive"):
+        if not sys.stdin.isatty():
+            failure("Interactive hunk staging requires a terminal.")
+            return False
+        explain(
+            "Runs git add -p. Git shows each hunk and asks whether to stage it.",
+            "Hunk-level staging gives precise control over a commit without external tools.",
+            "Untracked files are not included by git add -p; stage them separately if needed.",
+        )
+        code = run_interactive(["git", "add", "-p"], cwd=root)
+        if code != 0:
+            failure("Interactive staging did not complete.")
+            return False
+        staged = git_out(root, "diff", "--cached", "--name-only")
+        if not staged:
+            warning("No staged files.")
+            return False
+        success(f"Staged {len(staged.splitlines())} path(s).")
+        return True
     if mode in ("a", "all", ""):
         command = ["git", "add", "-A"]
     elif mode in ("s", "select"):
@@ -6195,7 +6701,6 @@ def review_staged_safety(root: Path) -> bool:
     sensitive = [path for path in paths if is_sensitive_name(path)]
     findings, truncated = scan_secret_content(root, paths)
     problems = []
-    near_limit: List[Tuple[str, int]] = []
     large_warning: List[Tuple[str, int]] = []
     for path in paths:
         absolute = root / path
@@ -6205,20 +6710,13 @@ def review_staged_safety(root: Path) -> bool:
             size = absolute.stat().st_size
         except OSError:
             continue
-        if size >= 95 * 1024 * 1024:
-            near_limit.append((path, size))
-        elif size >= 50 * 1024 * 1024:
+        if size >= 50 * 1024 * 1024:
             large_warning.append((path, size))
     if sensitive:
         problems.append("Sensitive filenames: " + ", ".join(sensitive[:8]))
-    if near_limit:
-        problems.append(
-            "Files at/near GitHub's 100 MiB limit: "
-            + ", ".join(f"{path} ({format_size(size)})" for path, size in near_limit[:5])
-        )
     if large_warning:
-        warning(
-            "Large staged files (GitHub warns above 50 MiB): "
+        info(
+            "Large staged files (no app limit; the remote may reject them): "
             + ", ".join(f"{path} ({format_size(size)})" for path, size in large_warning[:5])
         )
     if findings:
@@ -6245,7 +6743,7 @@ def review_staged_safety(root: Path) -> bool:
         answer = ""
     if answer == "COMMIT":
         return True
-    risky_paths = sorted(set(sensitive + [path for path, _, _, _ in findings] + [path for path, _ in near_limit]))
+    risky_paths = sorted(set(sensitive + [path for path, _, _, _ in findings]))
     if risky_paths and unstage_paths(root, risky_paths):
         info("Risky paths were unstaged; working-tree files were not changed.")
     return False
