@@ -18,6 +18,7 @@ import getpass
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import stat
@@ -1684,12 +1685,17 @@ def remote_default_branch(root: Path) -> Optional[str]:
     return None
 
 
+def unique_suffix() -> str:
+    """Return a timestamp plus random suffix so backups never collide."""
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+
+
 def create_backup_ref(root: Path, label: str, revision: str = "HEAD") -> Optional[str]:
     sha = git_out(root, "rev-parse", revision)
     if not sha:
         return None
     safe_label = re.sub(r"[^A-Za-z0-9._/-]+", "-", label).strip("-") or "backup"
-    ref = f"refs/git-create-backups/{safe_label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    ref = f"refs/git-create-backups/{safe_label}-{unique_suffix()}"
     result = git(root, "update-ref", ref, sha, timeout=10)
     return ref if result.returncode == 0 else None
 
@@ -1707,14 +1713,11 @@ def create_worktree_backup(root: Path, label: str = "working-tree") -> Optional[
         os.chmod(backup_dir, 0o700)
     except OSError:
         return None
-    patch = backup_dir / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.patch"
+    patch = backup_dir / f"{label}-{unique_suffix()}.patch"
     result = git(root, "diff", "--binary", "--no-color", "--", timeout=30)
     if result.returncode != 0:
         return None
-    try:
-        patch.write_text(result.out, encoding="utf-8")
-        os.chmod(patch, 0o600)
-    except OSError:
+    if not write_exclusive_text(patch, result.out, 0o600):
         return None
     return patch
 
@@ -2863,15 +2866,39 @@ def ask_path_selection(paths: Sequence[str], prompt: str = "Select paths") -> Li
 # ---------------------------------------------------------------------------
 
 
+def write_exclusive_text(path: Path, content: str, mode: int = 0o644) -> bool:
+    """Create a new file without following symlinks or overwriting anything."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(path), flags, mode)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(content)
+        os.chmod(path, mode)
+    except OSError:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        return False
+    return True
+
+
 def write_new_file(path: Path, content: str, label: str) -> bool:
     if path.exists():
         info(f"{label} already exists: {path}")
         return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
     except OSError as exc:
-        failure(f"could not write {path}: {exc}")
+        failure(f"could not create {path.parent}: {exc}")
+        return False
+    if not write_exclusive_text(path, content if content.endswith("\n") else content + "\n"):
+        failure(f"could not create {path}; it may already exist or be a symlink")
         return False
     success(f"created {path}")
     return True
@@ -4487,7 +4514,7 @@ class App:
                             git_out(
                                 path,
                                 "for-each-ref",
-                                f"--format=%(refname:short) %(objecttype) %(objectname:short) %(contents:subject)",
+                                "--format=%(refname:short) %(objecttype) %(objectname:short) %(contents:subject)",
                                 f"refs/tags/{tag}",
                             )
                         )
@@ -5874,8 +5901,11 @@ class App:
             elif choice == "2":
                 reviews_text = ask("Required approving reviews", default="1")
                 try:
-                    reviews = max(0, min(int(reviews_text), 6))
+                    reviews = int(reviews_text)
                 except ValueError:
+                    failure("Enter a number from 0 to 6.")
+                    continue
+                if not 0 <= reviews <= 6:
                     failure("Enter a number from 0 to 6.")
                     continue
                 enforce = confirm("Enforce protection for administrators too?", False)
@@ -6593,7 +6623,7 @@ class App:
             return
         print("Tracking reference: " + remote_ref)
 
-        backup_name = f"backup/{branch}-{time.strftime('%Y%m%d-%H%M%S')}"
+        backup_name = f"backup/{branch}-{unique_suffix()}"
         explain(
             f"Runs git branch {backup_name} HEAD, creating another local name for the "
             "current commit.",
@@ -6672,10 +6702,10 @@ class App:
             "This tool intentionally does not auto-merge, auto-rebase, or force-push diverged histories."
         )
         print("Useful next commands:")
-        print(f"  git log --oneline --graph --decorate --all")
+        print("  git log --oneline --graph --decorate --all")
         print(f"  git diff HEAD...{remote_ref}")
         print(f"  git switch {branch}")
-        print(f"  # then merge/rebase deliberately, run tests, and push normally")
+        print("  # then merge/rebase deliberately, run tests, and push normally")
 
     # -- commit and push ----------------------------------------------------
 
@@ -6805,7 +6835,10 @@ class App:
                 if len(values) == 2:
                     ahead, behind = int(values[0]), int(values[1])
                     if behind:
-                        warning(f"Local is {behind} commit(s) behind {upstream}; a normal push may be rejected.")
+                        warning(
+                            f"Local is {behind} commit(s) behind and {ahead} ahead of {upstream}; "
+                            "a normal push may be rejected."
+                        )
                         info("Use option 7 (scenario D) to diagnose, or pull --ff-only after committing/stashing local work.")
                         if not confirm("Attempt a normal (non-force) push anyway?", False):
                             return False
@@ -6872,7 +6905,6 @@ class App:
             info("Nothing to rename.")
             return
 
-        old_path = path
         if rename_local:
             destination = path.parent / new_folder
             if destination.exists():
@@ -7309,7 +7341,7 @@ class App:
             "offers the gh auth refresh command.",
         )
         print("Commands:")
-        print(f"  gh auth refresh -h github.com -s admin:ssh_signing_key")
+        print("  gh auth refresh -h github.com -s admin:ssh_signing_key")
         print(f"  gh ssh-key add {key_path} --type signing")
         if not confirm("Add this key to GitHub now?", True):
             return
@@ -7764,10 +7796,10 @@ def create_stash_backup(root: Path, stash_ref: str, label: str = "stash") -> Opt
     try:
         backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(backup_dir, 0o700)
-        patch = backup_dir / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.patch"
-        patch.write_text(result.out, encoding="utf-8")
-        os.chmod(patch, 0o600)
     except OSError:
+        return None
+    patch = backup_dir / f"{label}-{unique_suffix()}.patch"
+    if not write_exclusive_text(patch, result.out, 0o600):
         return None
     return patch
 

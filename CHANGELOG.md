@@ -2,6 +2,17 @@
 
 All notable changes to `git-create` are recorded here.
 
+## Unreleased
+
+- Hardened recovery backups with collision-resistant names and exclusive,
+  private file creation that refuses symlinks and overwrites.
+- Added a security policy, contribution guide, CODEOWNERS, issue and pull
+  request templates, Dependabot, and CodeQL.
+- Added an enterprise readiness review and prioritized adoption roadmap.
+- Hardened CI with pinned actions, Python 3.10-3.14, Ruff linting, timeouts, and
+  concurrency cancellation.
+- Added version-consistency and backup-safety tests.
+
 ## 1.7.0
 
 - Added worktree list/add/remove/prune operations.

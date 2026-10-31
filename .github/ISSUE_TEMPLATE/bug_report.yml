@@ -1,0 +1,83 @@
+name: Bug report
+description: Report a reproducible defect in git-create
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, private keys, tokens, or private repository
+        contents. Report security vulnerabilities privately through the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: git-create version
+      description: Output of `./git-create --version`.
+      placeholder: git-create 1.7.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - WSL
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      placeholder: Python 3.12.4
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Git, gh, and shell versions
+      placeholder: git 2.45.2, gh 2.55.0, bash 5.2
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use a temporary repository and remove all sensitive data.
+      placeholder: |
+        1. Run ...
+        2. Choose ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Redacted output
+      description: Run with `--no-color --debug` if a traceback is needed.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed secrets and private data from this report.
+          required: true
+        - label: I tested the latest available version.
+          required: true

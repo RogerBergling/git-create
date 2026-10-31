@@ -146,6 +146,43 @@ class GitCreateTests(unittest.TestCase):
         self.assertIn("mit", mod["LICENSE_TEMPLATES"])
         self.assertIn("Managed by git-create", mod["PRE_COMMIT_HOOK"])
 
+    def test_version_consistency(self) -> None:
+        import runpy
+
+        mod = runpy.run_path(str(APP), run_name="git_create_version_test")
+        version = mod["VERSION"]
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn(f"Current version: **{version}**.", readme)
+        self.assertIn(f"## {version}", changelog)
+        self.assertEqual(self.run_app("--version").stdout.strip(), f"git-create {version}")
+
+    def test_backup_refs_are_unique(self) -> None:
+        import runpy
+
+        repo = self.make_repo()
+        mod = runpy.run_path(str(APP), run_name="git_create_backup_test")
+        first = mod["create_backup_ref"](repo, "same-label")
+        second = mod["create_backup_ref"](repo, "same-label")
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first, second)
+
+    def test_exclusive_private_write(self) -> None:
+        import runpy
+
+        repo = self.make_repo()
+        mod = runpy.run_path(str(APP), run_name="git_create_write_test")
+        target = repo / "private.txt"
+        self.assertTrue(mod["write_exclusive_text"](target, "first", 0o600))
+        self.assertFalse(mod["write_exclusive_text"](target, "second", 0o600))
+        self.assertEqual(target.read_text(encoding="utf-8"), "first")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+        link = repo / "private-link"
+        link.symlink_to(target)
+        self.assertFalse(mod["write_exclusive_text"](link, "third", 0o600))
+        self.assertEqual(target.read_text(encoding="utf-8"), "first")
+
 
 if __name__ == "__main__":
     unittest.main()

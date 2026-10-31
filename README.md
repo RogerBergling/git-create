@@ -48,6 +48,10 @@ Current version: **1.7.0**.
 - [Development and validation](#development-and-validation)
 - [Automated tests and CI](#automated-tests-and-ci)
 - [Changelog](#changelog)
+- [Security policy](#security-policy)
+- [Contributing](#contributing)
+- [Enterprise readiness](#enterprise-readiness)
+- [License](#license)
 - [Repository layout](#repository-layout)
 
 The app is deliberately conservative:
@@ -1265,13 +1269,22 @@ and compare histories with scenario D.
 
 ## Development and validation
 
-The application is intentionally one file. There is no build system and no
-dependency file.
+The runtime is intentionally one file and has no third-party Python
+dependencies. Development-only tooling is pinned in `requirements-dev.txt`;
+it is not needed to run the application.
 
 Validate syntax without creating bytecode in the repository:
 
 ```bash
 python3 -c "compile(open('git-create').read(), 'git-create', 'exec')"
+```
+
+Install the optional lint tooling and run the checks:
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+ruff check git-create tests
+make verify
 ```
 
 Run the non-interactive self-check:
@@ -1308,13 +1321,60 @@ python3 -m unittest discover -s tests -v
 ```
 
 `.github/workflows/ci.yml` runs syntax checks, the test suite, and the offline
-self-check on Python 3.9, 3.12, and 3.13. The suite includes black-box CLI
-tests and interactive-flow tests for worktrees, submodules, remotes, tags,
-branch protection, Actions secrets, audit output, and dry-run behavior.
+self-check on Python 3.9 through 3.14, plus a Ruff lint job. GitHub Actions are
+pinned to commit SHAs. Dependabot keeps actions and development tools current,
+and CodeQL scans the runtime weekly and on pull requests. The suite includes
+black-box CLI tests and interactive-flow tests for worktrees, submodules,
+remotes, tags, branch protection, Actions secrets, audit output, dry-run
+behavior, version consistency, and backup safety.
+
+The current coverage is integration-heavy and does not yet meet a typical
+enterprise gate; coverage and type-check ratchets are tracked in the enterprise
+roadmap.
 
 ## Changelog
 
 Release history is maintained in [`CHANGELOG.md`](CHANGELOG.md).
+
+## Security policy
+
+Security reporting, supported versions, and scope are documented in
+[`SECURITY.md`](SECURITY.md). Report vulnerabilities privately through the
+repository's Security tab; do not open a public issue.
+
+## Contributing
+
+Development constraints, validation commands, and the pull request checklist are
+documented in [`CONTRIBUTING.md`](CONTRIBUTING.md). `make verify` runs lint,
+tests, the offline self-check, and the history secret scan.
+
+No license has been declared yet. External contributions should wait until the
+maintainer selects a license; see the [License](#license) section.
+
+## Enterprise readiness
+
+[`docs/ENTERPRISE-READINESS.md`](docs/ENTERPRISE-READINESS.md) contains the
+prioritized enterprise review and adoption checklist. Current known gaps
+include:
+
+- no declared repository license;
+- `github.com` only, with no GitHub Enterprise Server support;
+- no durable audit log or policy-as-code enforcement;
+- Linux-only runtime support;
+- no non-interactive mutation API for automation;
+- no tagged release, checksums, SBOM, or build provenance;
+- basic branch protection and repository-level Actions secrets only;
+- no SARIF/baseline support in the secret scanner.
+
+The single-file runtime and its safety guardrails are intentional strengths;
+the roadmap preserves them while addressing the gaps above.
+
+## License
+
+No license has been declared. Until a `LICENSE` file is added, the repository is
+not suitable for redistribution, external contributions, or enterprise
+deployment. The maintainer must choose a license; this review does not make that
+legal decision automatically.
 
 ## Repository layout
 
@@ -1322,17 +1382,23 @@ Release history is maintained in [`CHANGELOG.md`](CHANGELOG.md).
 git-create                  # the complete application (Python, executable)
 README.md                   # this documentation
 CHANGELOG.md                # release history
+SECURITY.md                 # vulnerability reporting and security scope
+CONTRIBUTING.md             # development and pull request rules
+Makefile                    # local lint/test/check/secret-scan shortcuts
+pyproject.toml              # Ruff configuration
+requirements-dev.txt        # pinned development-only lint tool
 .gitignore                  # repository hygiene for the app itself
 .dockerignore               # keeps the Docker context clean if one is ever added
 .editorconfig               # consistent indentation and line endings across editors
-.github/workflows/ci.yml    # development CI
+.github/                    # CI, CodeQL, Dependabot, ownership, and templates
 docs/screenshots/           # terminal-style README screenshots (SVG)
+docs/ENTERPRISE-READINESS.md # prioritized enterprise review and roadmap
 examples/generated/         # showcase copies of generated files (not runtime deps)
 tests/                      # development tests (not runtime deps)
 ```
 
 The application is still distributed as the single `git-create` file. The
-README, ignore/editor files, and `examples/` are repository files, not runtime
-dependencies. The app never uses `examples/` as templates or configuration.
-Like any other project content, example files may be included in secret and
-history scans.
+README, security and contribution policies, tooling files, and `examples/` are
+repository files, not runtime dependencies. The app never uses `examples/` as
+templates or configuration. Like any other project content, example files may
+be included in secret and history scans.

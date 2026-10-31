@@ -206,7 +206,6 @@ class InteractiveTests(unittest.TestCase):
         mod = self.load()
         app = mod["App"]()
         app.project = self.repo
-        answers = iter(["v1.0.0", "HEAD", "a", "Release", "v1.0.0", "0"])
 
         def ask(prompt, default=None, allow_empty=False):
             if prompt.startswith("Tag name"):
