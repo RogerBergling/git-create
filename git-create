@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 APP = "git-create"
-VERSION = "1.1.0"
+VERSION = "1.3.0"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -139,6 +139,7 @@ target/
 
 DOCKERIGNORE_TEMPLATE = """\
 .git
+.github
 .gitignore
 .gitattributes
 .env
@@ -187,6 +188,132 @@ Describe how to install, configure, and run this project here.
 - The default branch is `main`.
 - Local secrets belong in `.env`; only `.env.example` should be committed.
 - Run `git-create` in this directory to verify the repository before pushing.
+"""
+
+DOCKERFILE_PYTHON_TEMPLATE = """\
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \\
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Git and SSH are commonly needed by development/release CLIs.
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \\
+    && rm -rf /var/lib/apt/lists/*
+
+COPY . .
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; fi
+
+CMD __CMD__
+"""
+
+DOCKERFILE_NODE_TEMPLATE = """\
+FROM node:20-slim
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN if [ -f package-lock.json ]; then npm ci; elif [ -f package.json ]; then npm install; fi
+
+COPY . .
+
+CMD ["npm", "start"]
+"""
+
+DOCKERFILE_STATIC_TEMPLATE = """\
+FROM nginx:1.27-alpine
+
+COPY . /usr/share/nginx/html
+
+EXPOSE 80
+"""
+
+DOCKERFILE_GENERIC_TEMPLATE = """\
+FROM debian:bookworm-slim
+
+RUN apt-get update \\
+    && apt-get install -y --no-install-recommends ca-certificates git openssh-client \\
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+# TODO: replace this with the real startup command for your project.
+CMD ["bash"]
+"""
+
+GHCR_WORKFLOW_TEMPLATE = """\
+name: Build and publish GHCR image
+
+"on":
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: __IMAGE__
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+"""
+
+GITATTRIBUTES_TEMPLATE = """\
+# Normalize text files to LF in the repository.
+* text=auto eol=lf
+
+# Windows scripts may need CRLF in the working tree.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Explicit binary files.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.7z binary
+*.woff binary
+*.woff2 binary
 """
 
 EDITORCONFIG_TEMPLATE = """\
@@ -377,6 +504,7 @@ FILE_HELP = {
     ".dockerignore": "Keeps .git, secrets, dependencies, and build output out of Docker build contexts.",
     "README.md": "Explains what the project is and how to use it; it is the front page on GitHub.",
     ".editorconfig": "Keeps indentation and line endings consistent across editors.",
+    ".gitattributes": "Defines line-ending rules and marks binary files for Git.",
     ".env.example": "Documents required environment variable names without committing secret values.",
 }
 
@@ -648,6 +776,23 @@ def run_cmd(
         return CmdResult(cmd, 127, "", f"command not found: {cmd[0]}")
     except OSError as exc:
         return CmdResult(cmd, 126, "", str(exc))
+
+
+def run_cmd_bytes(args: Sequence[object], cwd: Optional[Path] = None, timeout: int = 30) -> Optional[bytes]:
+    """Run a command and return stdout bytes, or None on failure."""
+    try:
+        result = subprocess.run(
+            [str(arg) for arg in args],
+            cwd=str(cwd) if cwd else None,
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
 
 
 def run_interactive(args: Sequence[object], cwd: Optional[Path] = None) -> int:
@@ -1327,6 +1472,13 @@ def tracked_files(root: Path) -> List[str]:
     return [item for item in result.out.split("\0") if item]
 
 
+def untracked_files(root: Path) -> List[str]:
+    result = git(root, "ls-files", "--others", "--exclude-standard", "-z", timeout=20)
+    if result.returncode != 0:
+        return []
+    return [item for item in result.out.split("\0") if item]
+
+
 def effective_identity(root: Path) -> Tuple[str, str]:
     return (
         git_out(root, "config", "--get", "user.name"),
@@ -1353,6 +1505,71 @@ def remote_urls(root: Path) -> Dict[str, str]:
         if url:
             remotes[name] = url
     return remotes
+
+
+def local_branch_names(root: Path) -> List[str]:
+    result = git(root, "branch", "--format=%(refname:short)", timeout=15)
+    if result.returncode != 0:
+        return []
+    return [line.strip() for line in result.out.splitlines() if line.strip()]
+
+
+def remote_branch_names(root: Path) -> List[str]:
+    result = git(root, "branch", "-r", "--format=%(refname:short)", timeout=15)
+    if result.returncode != 0:
+        return []
+    return [
+        line.strip()
+        for line in result.out.splitlines()
+        if line.strip() and not line.strip().endswith("/HEAD")
+    ]
+
+
+def valid_branch_name(root: Path, name: str) -> bool:
+    if not name or name.startswith("-"):
+        return False
+    result = git(root, "check-ref-format", "--branch", name, timeout=10)
+    return result.returncode == 0
+
+
+def remote_default_branch(root: Path) -> Optional[str]:
+    value = git_out(root, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD")
+    if value and "/" in value:
+        return value.split("/", 1)[1]
+    return None
+
+
+def create_backup_ref(root: Path, label: str, revision: str = "HEAD") -> Optional[str]:
+    sha = git_out(root, "rev-parse", revision)
+    if not sha:
+        return None
+    safe_label = re.sub(r"[^A-Za-z0-9._/-]+", "-", label).strip("-") or "backup"
+    ref = f"refs/git-create-backups/{safe_label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    result = git(root, "update-ref", ref, sha, timeout=10)
+    return ref if result.returncode == 0 else None
+
+
+def create_worktree_backup(root: Path, label: str = "working-tree") -> Optional[Path]:
+    git_dir_raw = git_out(root, "rev-parse", "--git-dir")
+    if not git_dir_raw:
+        return None
+    git_dir = Path(git_dir_raw)
+    if not git_dir.is_absolute():
+        git_dir = root / git_dir
+    backup_dir = git_dir / "git-create-backups"
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    patch = backup_dir / f"{label}-{time.strftime('%Y%m%d-%H%M%S')}.patch"
+    result = git(root, "diff", "--binary", "--no-color", "--", timeout=30)
+    if result.returncode != 0:
+        return None
+    try:
+        patch.write_text(result.out, encoding="utf-8")
+    except OSError:
+        return None
+    return patch
 
 
 def check_remote_access(root: Path) -> Tuple[bool, Optional[str], str]:
@@ -1382,6 +1599,21 @@ def is_sensitive_name(path: str) -> bool:
         if fnmatch.fnmatch(name, pattern.lower()):
             return True
     return False
+
+
+def scan_bytes_for_secrets(data: bytes, max_findings: int = 50) -> Tuple[List[Tuple[int, str, bool]], bool]:
+    """Return (line, kind, high_risk) hits for a byte string."""
+    findings: List[Tuple[int, str, bool]] = []
+    if b"\0" in data[:8192]:
+        return findings, False
+    for line_number, line in enumerate(data.splitlines(), 1):
+        for pattern, kind, high_risk in CONTENT_PATTERNS:
+            if pattern.search(line):
+                findings.append((line_number, kind, high_risk))
+                if len(findings) >= max_findings:
+                    return findings, True
+                break
+    return findings, False
 
 
 def scan_secret_content(
@@ -1416,16 +1648,107 @@ def scan_secret_content(
             continue
         scanned += 1
         total += len(data)
-        if b"\0" in data[:8192]:
-            continue
-        for line_number, line in enumerate(data.splitlines(), 1):
-            for pattern, kind, high_risk in CONTENT_PATTERNS:
-                if pattern.search(line):
-                    findings.append((relative, line_number, kind, high_risk))
-                    if len(findings) >= 50:
-                        return findings, True
-                    break
+        hits, hit_truncated = scan_bytes_for_secrets(data, max_findings=max(1, 50 - len(findings)))
+        for line_number, kind, high_risk in hits:
+            findings.append((relative, line_number, kind, high_risk))
+        if hit_truncated or len(findings) >= 50:
+            return findings, True
     return findings, truncated
+
+
+def scan_history_secrets(
+    root: Path,
+    max_commits: int = 500,
+    max_blobs: int = 2000,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> Dict[str, object]:
+    """Scan unique blobs reachable from all refs for common secret patterns."""
+    max_commits = max(1, min(max_commits, 10000))
+    max_blobs = max(1, min(max_blobs, 20000))
+    total_commits_result = git(root, "rev-list", "--all", "--count", timeout=30)
+    try:
+        total_commits = int(total_commits_result.out.strip()) if total_commits_result.returncode == 0 else 0
+    except ValueError:
+        total_commits = 0
+    commits_result = git(root, "rev-list", "--all", "--max-count", str(max_commits), timeout=60)
+    commits = [line for line in commits_result.out.splitlines() if line.strip()] if commits_result.returncode == 0 else []
+
+    blob_paths: Dict[str, str] = {}
+    for commit in commits:
+        tree_result = git(root, "ls-tree", "-r", "-z", commit, timeout=60)
+        if tree_result.returncode != 0:
+            continue
+        for item in tree_result.out.split("\0"):
+            if not item:
+                continue
+            meta, separator, path = item.partition("\t")
+            if not separator:
+                continue
+            parts = meta.split()
+            if len(parts) != 3 or parts[1] != "blob":
+                continue
+            blob_paths.setdefault(parts[2], path)
+
+    total_blobs = len(blob_paths)
+    truncated = total_commits > len(commits) or total_blobs > max_blobs
+    findings: List[Dict[str, object]] = []
+    total = 0
+    scanned = 0
+    for oid, path in list(blob_paths.items())[:max_blobs]:
+        if total >= max_bytes or len(findings) >= 50:
+            truncated = True
+            break
+        if is_sensitive_name(path):
+            findings.append(
+                {
+                    "path": path,
+                    "line": 0,
+                    "kind": "sensitive filename",
+                    "high_risk": True,
+                    "object": oid[:12],
+                }
+            )
+            continue
+        size_result = git(root, "cat-file", "-s", oid, timeout=15)
+        try:
+            size = int(size_result.out.strip()) if size_result.returncode == 0 else -1
+        except ValueError:
+            size = -1
+        if size <= 0 or size > 2 * 1024 * 1024 or size > max_bytes - total:
+            if size > 2 * 1024 * 1024:
+                truncated = True
+            continue
+        data = run_cmd_bytes(["git", "-C", str(root), "cat-file", "-p", oid], timeout=30)
+        if data is None:
+            continue
+        scanned += 1
+        total += len(data)
+        hits, hit_truncated = scan_bytes_for_secrets(data, max_findings=max(1, 50 - len(findings)))
+        for line_number, kind, high_risk in hits:
+            findings.append(
+                {
+                    "path": path,
+                    "line": line_number,
+                    "kind": kind,
+                    "high_risk": high_risk,
+                    "object": oid[:12],
+                }
+            )
+        if hit_truncated or len(findings) >= 50:
+            truncated = True
+            break
+
+    return {
+        "commits_total": total_commits,
+        "commits_scanned": len(commits),
+        "blobs_total": total_blobs,
+        "blobs_scanned": scanned,
+        "bytes_scanned": total,
+        "max_commits": max_commits,
+        "max_blobs": max_blobs,
+        "truncated": truncated,
+        "findings": findings,
+    }
 
 
 def large_tracked_files(root: Path, paths: Sequence[str]) -> List[Tuple[str, int]]:
@@ -2000,6 +2323,18 @@ def build_project_report(
         if not gitignore.exists()
         else Check("PASS", ".gitignore", "present")
     )
+    dockerfile_path = root / "Dockerfile"
+    files.checks.append(
+        Check("PASS", "Dockerfile", "present")
+        if dockerfile_path.exists()
+        else Check("INFO", "Dockerfile", "not present", "Optional; option 16 can generate a starter Dockerfile.")
+    )
+    ghcr_workflow = root / ".github" / "workflows" / "ghcr.yml"
+    files.checks.append(
+        Check("PASS", "GHCR workflow", "present")
+        if ghcr_workflow.exists()
+        else Check("INFO", "GHCR workflow", "not present", "Optional; option 16 can generate a GHCR publishing workflow.")
+    )
     dockerignore = root / ".dockerignore"
     docker = dockerfile_present(root)
     if dockerignore.exists():
@@ -2174,9 +2509,33 @@ def build_project_report(
                 )
             )
         else:
-            safety.checks.append(Check("PASS", "Secret content scan", "no common secret patterns found"))
+            safety.checks.append(Check("PASS", "Secret content scan (tracked)", "no common secret patterns found"))
         if truncated:
-            safety.checks.append(Check("INFO", "Secret content scan", "scan limit reached; review large/binary files manually"))
+            safety.checks.append(Check("INFO", "Secret content scan (tracked)", "scan limit reached; review large/binary files manually"))
+
+        untracked = untracked_files(root)
+        untracked_findings, untracked_truncated = scan_secret_content(root, untracked)
+        if untracked_findings:
+            detail = ", ".join(f"{path}:{line} ({kind})" for path, line, kind, _ in untracked_findings[:8])
+            if len(untracked_findings) > 8:
+                detail += " ..."
+            safety.checks.append(
+                Check(
+                    "WARN",
+                    "Potential secrets in untracked files",
+                    detail,
+                    "Untracked files are not committed yet, but they could be staged later. "
+                    "Move real secrets into an ignored .env or a secret manager, and repair .gitignore.",
+                )
+            )
+        else:
+            safety.checks.append(
+                Check("PASS", "Secret content scan (untracked)", "no common secret patterns found")
+            )
+        if untracked_truncated:
+            safety.checks.append(
+                Check("INFO", "Secret content scan (untracked)", "scan limit reached; review large/binary files manually")
+            )
 
     large_files = large_tracked_files(root, tracked)
     very_large = [(name, size) for name, size in large_files if size >= 95 * 1024 * 1024]
@@ -2327,6 +2686,40 @@ def ask_visibility(default: str = "private") -> str:
         warning("Choose private or public.")
 
 
+def ask_path_selection(paths: Sequence[str], prompt: str = "Select paths") -> List[str]:
+    if not paths:
+        return []
+    for index, path in enumerate(paths, 1):
+        print(f"  {index:>3}) {path}")
+    selection = ask(f"{prompt} ('all' or numbers/ranges)", default="all").strip()
+    if selection.lower() in ("all", "a", ""):
+        return list(paths)
+    chosen: List[str] = []
+    for part in selection.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, end_text = part.split("-", 1)
+            try:
+                start, end = int(start_text), int(end_text)
+            except ValueError:
+                warning(f"Invalid range: {part}")
+                return []
+            for index in range(start, end + 1):
+                if 1 <= index <= len(paths):
+                    chosen.append(paths[index - 1])
+        else:
+            try:
+                index = int(part)
+            except ValueError:
+                warning(f"Invalid number: {part}")
+                return []
+            if 1 <= index <= len(paths):
+                chosen.append(paths[index - 1])
+    return list(dict.fromkeys(chosen))
+
+
 # ---------------------------------------------------------------------------
 # File management helpers
 # ---------------------------------------------------------------------------
@@ -2337,6 +2730,7 @@ def write_new_file(path: Path, content: str, label: str) -> bool:
         info(f"{label} already exists: {path}")
         return False
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content if content.endswith("\n") else content + "\n", encoding="utf-8")
     except OSError as exc:
         failure(f"could not write {path}: {exc}")
@@ -2417,6 +2811,16 @@ def ensure_editorconfig(root: Path, ask_first: bool = True) -> bool:
     return write_new_file(path, EDITORCONFIG_TEMPLATE, ".editorconfig")
 
 
+def ensure_gitattributes(root: Path, ask_first: bool = True) -> bool:
+    path = root / ".gitattributes"
+    if path.exists():
+        info(f".gitattributes already exists: {path}")
+        return False
+    if ask_first and not confirm("Create a .gitattributes template?", True):
+        return False
+    return write_new_file(path, GITATTRIBUTES_TEMPLATE, ".gitattributes")
+
+
 def ensure_env_example(root: Path, ask_first: bool = True) -> bool:
     target = root / ".env.example"
     source = root / ".env"
@@ -2474,6 +2878,9 @@ def print_file_checklist(root: Path) -> None:
         ("LICENSE", "yes" if find_license(root) else "missing"),
         (".env.example", "yes" if (root / ".env.example").exists() else "not present"),
         (".editorconfig", "yes" if (root / ".editorconfig").exists() else "missing"),
+        (".gitattributes", "yes" if (root / ".gitattributes").exists() else "missing"),
+        ("Dockerfile", "yes" if (root / "Dockerfile").exists() else "missing"),
+        ("GHCR workflow", "yes" if (root / ".github" / "workflows" / "ghcr.yml").exists() else "missing"),
     ]
     for label, value in checks:
         print(f"  {label:16} {value}")
@@ -2524,6 +2931,10 @@ class App:
                     "10": self.settings_action,
                     "11": self.files_action,
                     "12": self.help_action,
+                    "13": self.history_secrets_action,
+                    "14": self.branches_action,
+                    "15": self.revert_action,
+                    "16": self.docker_action,
                 }
                 action = actions.get(choice)
                 if action is None:
@@ -2565,13 +2976,17 @@ class App:
             ("3", "Select active project"),
             ("4", "Scenario A: create a new GitHub repo and clone it"),
             ("5", "Scenario B: clone an existing GitHub repo"),
-            ("6", "Scenario C: publish an existing local project"),
+            ("6", "Scenario C: publish a local project or repository"),
             ("7", "Scenario D: diagnose local/remote history (no force)"),
             ("8", "Commit and push changes"),
             ("9", "Rename local folder and/or GitHub repository"),
             ("10", "Check/fix global Git and GitHub settings"),
             ("11", "Check/add important project files"),
             ("12", "Help: Git concepts, commands, scenarios, safety"),
+            ("13", "Scan Git history for secrets"),
+            ("14", "Branches: list/create/switch/rename/delete/upstream"),
+            ("15", "Undo/revert: local changes, commits, remote-safe revert"),
+            ("16", "Add Dockerfile and GHCR publishing workflow"),
             ("0", "Exit"),
         ]
         for number, label in items:
@@ -2656,6 +3071,16 @@ class App:
                 git fsck                  Check object-database integrity.
                                           Why: detect missing or corrupt repository objects.
 
+                git switch / branch       List, create, switch, rename, or delete branches.
+                                          Why: isolate work and control which history grows.
+
+                git reset --soft          Remove the last local commit but keep its changes.
+                                          Why: undo an unpublished commit without losing work.
+                                          The app refuses if HEAD is already on a remote.
+
+                git revert                Create a new commit that reverses an old commit.
+                                          Why: safely undo shared history without force-pushing.
+
                 gh repo create            Create a GitHub repository and optionally push.
                 gh repo clone             Clone a GitHub repository using gh authentication.
                 gh repo rename            Rename the GitHub repository and update origin.
@@ -2697,6 +3122,8 @@ class App:
                 C) Existing local project becomes a new GitHub repository
                    Creates .gitignore first, initializes main, reviews/stages files,
                    signs the initial commit, then creates the remote and pushes.
+                   If the folder is already a Git repository with no remote, option
+                   6 publishes its existing history or connects an existing URL.
 
                 D) Local and remote repositories both exist
                    Fetches, shows graph/branches/merge-base, creates an optional local
@@ -2716,6 +3143,28 @@ class App:
                    Checks identity, default branch, pull.ff, push.default,
                    fetch.prune, editor, SSH commit signing, allowed signers,
                    GitHub URL rewrite, and gh authentication.
+
+                History secret scan (option 13)
+                   Walks reachable commits and scans unique blobs for common
+                   private-key and token patterns. A secret deleted in a later
+                   commit still exists in history, so this is separate from the
+                   working-tree scan.
+
+                Branches (option 14)
+                   Lists, creates, switches, renames, and deletes branches; sets
+                   upstream and shows the branch graph. Local deletion keeps a
+                   safety ref, and remote deletion requires a typed phrase.
+
+                Undo/revert (option 15)
+                   Unstages changes, discards selected unstaged edits with a
+                   backup patch, creates safe git revert commits, or soft-undos
+                   an unpublished local commit. Remote history is changed only
+                   by a normal revert commit push, never by force.
+
+                Docker/GHCR (option 16)
+                   Creates a starter Dockerfile and a GitHub Actions workflow
+                   that builds and pushes to ghcr.io using GITHUB_TOKEN. Existing
+                   files are never overwritten.
                 """
             )
         )
@@ -2725,6 +3174,7 @@ class App:
                 """\
                 git-create check [PATH] [--offline] [--json] [--strict]
                 git-create scan [PATH] [--depth N] [--json]
+                git-create secrets [PATH] [--json] [--max-commits N] [--max-blobs N]
                 git-create --version
                 git-create --help
 
@@ -2849,6 +3299,618 @@ class App:
         if confirm("Run verification now?", True):
             self.verify_path(self.project)
 
+    def revert_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "This menu distinguishes local file changes from Git history. It can discard "
+            "working-tree edits, unstage changes, create a revert commit, or undo an "
+            "unpublished local commit.",
+            "Reverting a pushed commit must create a new commit so other clones stay "
+            "compatible. Rewriting shared history would require a force push, which this "
+            "app never does.",
+            "Destructive local discards require a typed confirmation and save a patch under "
+            ".git/git-create-backups first. Remote history is only changed by a normal revert "
+            "commit push.",
+        )
+        while True:
+            status = git_out(path, "status", "--short")
+            staged = git_out(path, "diff", "--cached", "--stat")
+            unstaged = git_out(path, "diff", "--stat")
+            heading("Undo / revert helpers")
+            if status:
+                print(status)
+            else:
+                success("Working tree is clean.")
+            if staged:
+                print(col("Staged:", "bold"))
+                print(staged)
+            if unstaged:
+                print(col("Unstaged:", "bold"))
+                print(unstaged)
+            print()
+            print("  1) Show full staged diff")
+            print("  2) Unstage all changes (safe; files stay)")
+            print("  3) Discard unstaged changes to selected tracked files (backup first)")
+            print("  4) Revert a commit with a new commit (safe for shared history)")
+            print("  5) Undo the last local commit, keep changes (only if never pushed)")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                show_staged_diff(path)
+            elif choice in ("2", "3") and in_progress_operations(path):
+                failure("A Git operation is in progress; finish or abort it before changing the index or files.")
+            elif choice == "2":
+                staged_paths_list = staged_paths(path, added_only=False)
+                if not staged_paths_list:
+                    info("There are no staged changes.")
+                    continue
+                explain(
+                    "Removes files from the staging area with git restore --staged (or "
+                    "git rm --cached on an unborn branch).",
+                    "The working-tree files stay exactly as they are. You can review and "
+                    "stage them again.",
+                    "This is an index-only operation, not a data-loss operation.",
+                )
+                if confirm(f"Unstage {len(staged_paths_list)} path(s)?", True):
+                    if unstage_paths(path, staged_paths_list):
+                        success("All staged paths were unstaged.")
+            elif choice == "3":
+                result = git(path, "diff", "--name-only", "-z", "--", timeout=20)
+                paths = [item for item in result.out.split("\0") if item] if result.returncode == 0 else []
+                if not paths:
+                    info("There are no unstaged changes in tracked files.")
+                    info("Untracked files are not discarded by this action.")
+                    continue
+                selected = ask_path_selection(paths, "Discard which paths")
+                if not selected:
+                    continue
+                backup = create_worktree_backup(path, "discard-unstaged")
+                if backup:
+                    info(f"Backup patch: {backup}")
+                else:
+                    warning("Could not create a backup patch; proceeding would be riskier.")
+                explain(
+                    "Runs git restore --worktree on the selected tracked paths.",
+                    "This permanently removes their unstaged edits from the working tree, "
+                    "but leaves staged content and untracked files alone.",
+                    "The operation is destructive. A backup patch is written first when "
+                    "possible, and a typed confirmation is required.",
+                )
+                phrase = "DISCARD"
+                typed = ask(f'Type "{phrase}" to discard the selected changes', allow_empty=True)
+                if typed != phrase:
+                    info("Discard cancelled.")
+                    continue
+                restore = run_cmd(["git", "restore", "--worktree", "--", *selected], cwd=path, timeout=60)
+                if restore.combined:
+                    print(restore.combined)
+                if restore.returncode == 0:
+                    success("Selected unstaged changes were discarded.")
+                else:
+                    failure("Could not restore the selected paths.")
+            elif choice == "4":
+                self.revert_commit(path)
+            elif choice == "5":
+                self.undo_last_local_commit(path)
+            else:
+                warning("Unknown option.")
+
+    def revert_commit(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        revision = ask("Commit to revert (hash, branch, or HEAD)", default="HEAD")
+        verify = git(path, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}", timeout=15)
+        if verify.returncode != 0:
+            failure(f"Unknown commit: {revision}")
+            return
+        parents = git_out(path, "rev-list", "--parents", "-n", "1", revision).split()
+        if len(parents) > 2:
+            warning("This is a merge commit; a mainline parent would be required.")
+            info("Use git revert -m 1 <commit> manually after reviewing the merge.")
+            return
+        explain(
+            f"Runs git revert --no-edit {revision}. Git creates a new commit that applies "
+            "the inverse of the selected commit.",
+            "This is the safe way to undo a commit that may already be on the remote: other "
+            "clones keep a compatible history because nothing is rewritten.",
+            "If the revert conflicts, Git stops and leaves the operation in progress. "
+            "Resolve the files, then run git revert --continue, or abort deliberately.",
+        )
+        if not confirm(f"Create a revert commit for {revision}?", True):
+            return
+        result = run_cmd(["git", "revert", "--no-edit", revision], cwd=path, timeout=180)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Revert did not complete. No force was used.")
+            info("A conflict or merge commit may need manual resolution. Check git status.")
+            return
+        success("Revert commit created.")
+        if "origin" in remote_urls(path) and confirm("Push the revert commit now?", True):
+            self.push_current(path)
+
+    def undo_last_local_commit(self, path: Path) -> None:
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not current:
+            failure("Detached HEAD; check out a branch first.")
+            return
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        if git(path, "rev-parse", "--verify", "--quiet", "HEAD^").returncode != 0:
+            failure("HEAD has no parent commit; there is nothing to undo with a soft reset.")
+            return
+        if remote_urls(path):
+            if not confirm("Fetch remotes first to verify this commit was never pushed?", True):
+                return
+            fetch = run_cmd(
+                ["git", "fetch", "--all", "--prune"],
+                cwd=path,
+                timeout=120,
+                env_extra=remote_env(),
+            )
+            if fetch.returncode != 0:
+                failure("Fetch failed; cannot prove the commit is unpublished, so undo was cancelled.")
+                return
+        remote_contains = git_out(path, "branch", "-r", "--contains", "HEAD")
+        tag_contains = git_out(path, "tag", "--contains", "HEAD")
+        if remote_contains or tag_contains:
+            failure("HEAD is contained in a remote branch or tag; undoing it would rewrite shared history.")
+            info("Use option 4 to create a safe revert commit and push it normally.")
+            return
+        backup = create_backup_ref(path, f"before-soft-undo-{current}")
+        if not backup:
+            failure("Could not create a safety ref; undo cancelled.")
+            return
+        explain(
+            "Runs git reset --soft HEAD^ and keeps all changes staged.",
+            "This removes the last local commit from history while preserving its files in "
+            "the index, so you can edit and commit again.",
+            "It is refused when HEAD exists on a remote branch or tag. Local history is rewritten, "
+            "but no remote history is changed. The safety ref preserves the old commit.",
+        )
+        print("Command: " + col("git reset --soft HEAD^", "dim"))
+        phrase = "UNDO LAST COMMIT"
+        typed = ask(f'Type "{phrase}" to continue', allow_empty=True)
+        if typed != phrase:
+            info("Undo cancelled.")
+            return
+        result = run_cmd(["git", "reset", "--soft", "HEAD^"], cwd=path, timeout=30)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Last commit removed from history; changes are staged. Safety ref: {backup}")
+        else:
+            failure("Soft reset failed; no history was changed.")
+
+    def branches_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "A branch is a movable name pointing at a line of commits. This menu lists, "
+            "creates, switches, renames, and deletes branches.",
+            "Branches let you isolate work and keep main stable. Switching changes which "
+            "line of history your next commit extends.",
+            "Deleting a local branch backs up its tip as a hidden ref. Remote deletion asks "
+            "for a typed confirmation and never uses force or rewrites history.",
+        )
+        while True:
+            refresh = detect_git_root(path)
+            if refresh is None:
+                failure("The active project is no longer a Git repository.")
+                return
+            path = refresh
+            current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "(detached HEAD)"
+            local = local_branch_names(path)
+            remote = remote_branch_names(path)
+            upstream = git_out(path, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+            heading("Branch management")
+            print(f"  Current: {col(current, 'cyan')}")
+            print(f"  Local:   {', '.join(local) if local else '(none)'}")
+            print(f"  Remote:  {', '.join(remote) if remote else '(none)'}")
+            print(f"  Upstream: {upstream or '(not set)'}")
+            print()
+            print("  1) Show detailed branch list")
+            print("  2) Create a branch")
+            print("  3) Switch branch")
+            print("  4) Rename current branch")
+            print("  5) Delete local branch")
+            print("  6) Delete remote origin branch")
+            print("  7) Set upstream for current branch")
+            print("  8) Show branch graph")
+            print("  0) Back")
+            choice = ask("Choose an option", default="0", allow_empty=True)
+            if choice in ("0", ""):
+                return
+            if choice == "1":
+                print(git_out(path, "branch", "-vv"))
+            elif choice == "2":
+                self.create_branch(path)
+            elif choice == "3":
+                self.switch_branch(path)
+            elif choice == "4":
+                self.rename_branch(path)
+            elif choice == "5":
+                self.delete_local_branch(path)
+            elif choice == "6":
+                self.delete_remote_branch(path)
+            elif choice == "7":
+                self.set_upstream(path)
+            elif choice == "8":
+                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "30"))
+            else:
+                warning("Unknown option.")
+
+    def create_branch(self, path: Path) -> None:
+        name = ask("New branch name")
+        if not valid_branch_name(path, name):
+            failure("That is not a valid Git branch name.")
+            return
+        if name in local_branch_names(path):
+            failure(f"Local branch already exists: {name}")
+            return
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        switch_now = confirm(f"Switch to '{name}' after creating it?", True)
+        if switch_now and status_entries(path) and not confirm(
+            "The working tree has changes; switch and carry them to the new branch?", True
+        ):
+            return
+        command = ["git", "switch", "-c", name] if switch_now else ["git", "branch", name]
+        explain(
+            f"Creates branch '{name}' at the current commit"
+            + (" and switches to it." if switch_now else " without switching."),
+            "A new branch is just another name for the current commit. Switching makes "
+            "future commits belong to the new line of work.",
+            "Existing commits are not changed. If switching is blocked by conflicting local "
+            "changes, Git refuses and the app stops.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        result = run_cmd(command, cwd=path, timeout=30)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Branch creation failed.")
+            return
+        success(f"Branch '{name}' created.")
+        if switch_now and "origin" in remote_urls(path) and confirm(
+            "Push this branch and set upstream now?", False
+        ):
+            self.push_current(path)
+
+    def switch_branch(self, path: Path) -> None:
+        local = local_branch_names(path)
+        remote = remote_branch_names(path)
+        candidates = local + [item for item in remote if item not in local]
+        if not candidates:
+            warning("No branches available to switch to.")
+            return
+        print("  Local: " + (", ".join(local) if local else "(none)"))
+        print("  Remote: " + (", ".join(remote) if remote else "(none)"))
+        target = ask("Branch to switch to")
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if target == current:
+            info("That branch is already current.")
+            return
+        if target in local:
+            command = ["git", "switch", target]
+        elif target in remote:
+            local_name = target.split("/", 1)[1] if "/" in target else target
+            if local_name in local:
+                failure(f"Local branch already exists: {local_name}")
+                return
+            command = ["git", "switch", "-c", local_name, "--track", target]
+            info(f"Will create local branch '{local_name}' tracking '{target}'.")
+        else:
+            failure("Unknown branch. Choose a name from the lists above.")
+            return
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        if status_entries(path) and not confirm(
+            "The working tree has changes; attempt the switch and carry them?", True
+        ):
+            return
+        explain(
+            "Runs git switch. Git updates the working tree and HEAD to point at the "
+            "selected branch.",
+            "This is how you move between independent lines of work without merging them.",
+            "Uncommitted changes may prevent the switch. Git will refuse rather than lose them.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        result = run_cmd(command, cwd=path, timeout=60)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Branch switch failed; working-tree changes were not discarded.")
+        else:
+            success(f"Switched to branch '{target}'.")
+
+    def rename_branch(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not current:
+            failure("Detached HEAD; check out a branch before renaming.")
+            return
+        new_name = ask("New name for current branch", default=current)
+        if new_name == current:
+            info("Branch name unchanged.")
+            return
+        if not valid_branch_name(path, new_name):
+            failure("That is not a valid Git branch name.")
+            return
+        if new_name in local_branch_names(path):
+            failure(f"Local branch already exists: {new_name}")
+            return
+        backup = create_backup_ref(path, f"before-rename-{current}")
+        if backup:
+            info(f"Backup ref: {backup}")
+        command = ["git", "branch", "-m", new_name]
+        explain(
+            "Runs git branch -m to rename the current local branch.",
+            "The commits stay exactly the same; only the branch name changes. This does not "
+            "rename the branch on the remote.",
+            "Git does not rewrite history. If the old remote branch exists, update it or set "
+            "a new upstream deliberately.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        result = run_cmd(command, cwd=path, timeout=30)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("Branch rename failed.")
+            return
+        success(f"Branch renamed to '{new_name}'.")
+        info("The remote branch was not renamed. Push the new name and update the upstream if needed.")
+
+    def delete_local_branch(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        branches = [item for item in local_branch_names(path) if item != current]
+        if not branches:
+            warning("There is no other local branch to delete.")
+            return
+        print("  Deletable local branches: " + ", ".join(branches))
+        target = ask("Local branch to delete")
+        if target == current:
+            failure("Refusing to delete the current branch. Switch away first.")
+            return
+        if target not in local_branch_names(path):
+            failure(f"Unknown local branch: {target}")
+            return
+        if not confirm(f"Delete local branch '{target}'? A safety ref will preserve its tip.", True):
+            return
+        backup = create_backup_ref(path, f"deleted-branch-{target}", target)
+        if not backup:
+            failure("Could not create a safety ref; deletion cancelled.")
+            return
+        info(f"Backup ref saved: {backup}")
+        explain(
+            f"First tries git branch -d {target}, which refuses if the branch is not merged. "
+            "If it is unmerged, a second typed confirmation enables -D.",
+            "Deleting a branch removes only the name. The safety ref keeps the commits "
+            "reachable locally until you decide to clean it up.",
+            "The current branch is refused, and a remote branch is not deleted here.",
+        )
+        print("Command: " + col(f"git branch -d {target}", "dim"))
+        result = run_cmd(["git", "branch", "-d", target], cwd=path, timeout=30)
+        if result.returncode == 0:
+            success(f"Deleted local branch '{target}'.")
+            return
+        warning("Safe delete refused; the branch may contain unmerged commits.")
+        print(result.combined)
+        typed = ask(f'Type "DELETE BRANCH {target}" to force-delete the local ref', allow_empty=True)
+        if typed != f"DELETE BRANCH {target}":
+            info("Deletion cancelled; the branch remains.")
+            return
+        forced = run_cmd(["git", "branch", "-D", target], cwd=path, timeout=30)
+        if forced.combined:
+            print(forced.combined)
+        if forced.returncode == 0:
+            success(f"Deleted local branch '{target}'. Backup ref remains: {backup}")
+        else:
+            failure("Local branch deletion failed.")
+
+    def delete_remote_branch(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        if "origin" not in remote_urls(path):
+            failure("No origin remote.")
+            return
+        remote = remote_branch_names(path)
+        if not remote:
+            warning("No remote-tracking branches found. Run fetch first.")
+            return
+        print("  Remote branches: " + ", ".join(remote))
+        target = ask("Remote branch to delete (for example origin/feature)")
+        if target not in remote:
+            failure(f"Unknown remote branch: {target}")
+            return
+        if not target.startswith("origin/"):
+            failure("Only origin branches are supported by this action.")
+            return
+        branch_name = target.split("/", 1)[1]
+        default = remote_default_branch(path)
+        if not default:
+            _, default, _ = check_remote_access(path)
+        if default and branch_name == default:
+            failure(f"Refusing to delete the remote default branch '{branch_name}'.")
+            return
+        backup = create_backup_ref(path, f"deleted-remote-{branch_name}", target)
+        if backup:
+            info(f"Local safety ref for the remote tip: {backup}")
+        explain(
+            f"Runs git push origin --delete {branch_name}. This removes the branch name from "
+            "the remote; it does not rewrite other branches or force-push.",
+            "Remote branches are shared. Deleting one needs a deliberate confirmation because "
+            "other clones may be tracking it.",
+            "The remote default branch is refused. The local safety ref preserves the tip "
+            "until you clean it up.",
+        )
+        phrase = f"DELETE REMOTE {target}"
+        typed = ask(f'Type "{phrase}" to continue', allow_empty=True)
+        if typed != phrase:
+            info("Remote deletion cancelled.")
+            return
+        result = run_cmd(["git", "push", "origin", "--delete", branch_name], cwd=path, timeout=120, env_extra=remote_env())
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Deleted remote branch '{target}'.")
+            run_cmd(["git", "fetch", "--prune", "origin"], cwd=path, timeout=60, env_extra=remote_env())
+        else:
+            failure("Remote branch deletion failed. No force was used.")
+
+    def set_upstream(self, path: Path) -> None:
+        if in_progress_operations(path):
+            failure("A Git operation is in progress; finish or abort it first.")
+            return
+        current = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not current:
+            failure("Detached HEAD; check out a branch first.")
+            return
+        remote = remote_branch_names(path)
+        if not remote:
+            warning("No remote-tracking branches found. Fetch first.")
+            return
+        default = f"origin/{current}"
+        target = ask("Upstream branch", default=default if default in remote else None)
+        if target not in remote:
+            failure(f"Unknown remote branch: {target}")
+            return
+        explain(
+            f"Runs git branch --set-upstream-to={target} {current}.",
+            "Upstream tells plain git pull and git push which remote branch this local "
+            "branch corresponds to.",
+            "This only changes local branch configuration; it does not push or fetch.",
+        )
+        command = ["git", "branch", f"--set-upstream-to={target}", current]
+        print("Command: " + col(shlex.join(command), "dim"))
+        result = run_cmd(command, cwd=path, timeout=30)
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Upstream for '{current}' is now '{target}'.")
+        else:
+            failure("Could not set upstream.")
+
+    def docker_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        heading("Docker image and GHCR publishing workflow")
+        explain(
+            "Creates a starter Dockerfile and a GitHub Actions workflow that builds and "
+            "pushes the image to GitHub Container Registry (ghcr.io).",
+            "A container image gives you a reproducible runtime, and the workflow publishes "
+            "it automatically on pushes to main and version tags.",
+            "Existing Dockerfile or workflow files are never overwritten. The workflow uses "
+            "the repository's GITHUB_TOKEN; no registry password is stored in the repo.",
+        )
+        if not shutil.which("docker"):
+            warning("Docker is not installed locally. That is fine for generating files; "
+                    "GitHub Actions will run the build in its own runner.")
+        if (path / "package.json").exists():
+            detected = "node"
+        elif any((path / name).exists() for name in ("requirements.txt", "pyproject.toml", "setup.py")) or any(path.glob("*.py")) or (path / "git-create").exists():
+            detected = "python"
+        elif (path / "index.html").exists():
+            detected = "static"
+        else:
+            detected = "generic"
+        kind = ask("Container template [python/node/static/generic]", default=detected).lower()
+        if kind not in ("python", "node", "static", "generic"):
+            failure("Choose python, node, static, or generic.")
+            return
+
+        origin = remote_urls(path).get("origin", "")
+        parsed = parse_github_url(origin) if origin else None
+        if parsed:
+            owner, repo = parsed
+        else:
+            _, account, _ = gh_auth_status()
+            owner = account or "change-me"
+            repo = re.sub(r"[^a-z0-9._-]+", "-", path.name.lower()).strip("-") or "project"
+        default_image = f"ghcr.io/{owner.lower()}/{repo.lower()}"
+        if owner == "change-me":
+            warning("No GitHub remote or authenticated account was detected; replace the placeholder image owner.")
+        while True:
+            image = ask("Container image name", default=default_image).strip().lower()
+            if re.fullmatch(r"ghcr\.io/[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", image):
+                break
+            warning("Use a lowercase GHCR path such as ghcr.io/owner/repository.")
+
+        entrypoint = ""
+        if kind == "python":
+            py_candidates = sorted(item.name for item in path.glob("*.py"))
+            default_entry = (
+                "git-create"
+                if (path / "git-create").exists()
+                else ("main.py" if (path / "main.py").exists() else (py_candidates[0] if py_candidates else "main.py"))
+            )
+            entrypoint = ask("Python entrypoint file", default=default_entry)
+            if not entrypoint.strip() or "\n" in entrypoint:
+                failure("Invalid entrypoint.")
+                return
+
+        dockerfile = path / "Dockerfile"
+        workflow = path / ".github" / "workflows" / "ghcr.yml"
+        print()
+        print("Files to create:")
+        print(f"  Dockerfile      {dockerfile}" + (" (already exists; will not overwrite)" if dockerfile.exists() else ""))
+        print(f"  .dockerignore   {path / '.dockerignore'}")
+        print(f"  GHCR workflow   {workflow}" + (" (already exists; will not overwrite)" if workflow.exists() else ""))
+        print(f"  Image           {image}")
+        print()
+        if not confirm("Create these Docker/GHCR files?", True):
+            return
+
+        if not dockerfile.exists():
+            if kind == "python":
+                command = json.dumps(["python3", entrypoint])
+                content = DOCKERFILE_PYTHON_TEMPLATE.replace("__CMD__", command)
+            elif kind == "node":
+                content = DOCKERFILE_NODE_TEMPLATE
+            elif kind == "static":
+                content = DOCKERFILE_STATIC_TEMPLATE
+            else:
+                content = DOCKERFILE_GENERIC_TEMPLATE
+            write_new_file(dockerfile, content, "Dockerfile")
+        else:
+            info(f"Dockerfile already exists: {dockerfile}")
+
+        ensure_dockerignore(path)
+        if not (path / ".dockerignore").exists():
+            warning(".dockerignore was not created; the Docker build context may include .git, secrets, or large files.")
+        if not workflow.exists():
+            content = GHCR_WORKFLOW_TEMPLATE.replace("__IMAGE__", image)
+            write_new_file(workflow, content, "GHCR workflow")
+        else:
+            info(f"Workflow already exists: {workflow}")
+
+        print()
+        success("Docker/GHCR files are ready for review.")
+        info("GitHub Actions needs 'Read and write permissions' for workflow tokens or the workflow's packages: write permission.")
+        info("The first published package may be private by default. Adjust its visibility in GitHub package settings.")
+        info("If the repository is renamed, update the image name inside .github/workflows/ghcr.yml.")
+        status = git_out(path, "status", "--short")
+        if status:
+            print(status)
+            if confirm("Commit these files now?", False):
+                self.commit_and_push_action()
+
     def scenario_a(self) -> None:
         heading("Scenario A - new GitHub repository and clone")
         if not ensure_gh(require_auth=True, offer_login=True):
@@ -2972,8 +4034,7 @@ class App:
         existing_root = detect_git_root(path)
         if existing_root is not None:
             if existing_root == path:
-                warning("This directory is already a Git repository.")
-                info("Use scenario D to compare it with a remote, or option 8 to commit/push.")
+                self.publish_existing_repo(path)
             else:
                 warning(f"This directory is inside an existing repository: {existing_root}")
                 info("Refusing to create a nested repository. Select the actual project folder or move it out.")
@@ -3018,32 +4079,9 @@ class App:
         if (path / ".env").exists():
             ensure_env_example(path)
 
-        if not identity_ready(path):
-            info("The repository was initialized but no commit was created.")
+        if not self.commit_local(path, initial=True, success_message="Initial commit created."):
+            info("No commit was created; nothing was published.")
             return
-        if not stage_changes(path):
-            info("No files were staged. Nothing was committed or published.")
-            return
-        if not review_staged_safety(path):
-            return
-        print()
-        print(col("Staged changes:", "bold"))
-        print(git_out(path, "diff", "--cached", "--stat"))
-        explain(
-            "git commit records the staged snapshot as the first commit in local history.",
-            "This is the checkpoint that will be pushed to GitHub. Creating it locally "
-            "first means a GitHub failure cannot lose your work.",
-            "Nothing is uploaded yet. If signing fails, the repository and staged files remain intact.",
-        )
-        message = ask("Initial commit message", default="Initial commit")
-        commit_result = run_cmd(["git", "commit", "-m", message], cwd=path, timeout=180)
-        if commit_result.combined:
-            print(commit_result.combined)
-        if commit_result.returncode != 0:
-            failure("Commit failed. The local repository remains intact; fix the error and use option 8.")
-            print_signing_help()
-            return
-        success("Initial commit created.")
 
         remotes = remote_urls(path)
         if remotes:
@@ -3085,6 +4123,126 @@ class App:
         if result.returncode != 0:
             failure("GitHub repository creation or push failed.")
             info("The local repository and commit are safe. No force was used. Fix the error and retry.")
+            return
+        success("Published to GitHub.")
+        if confirm("Run a full verification now?", True):
+            self.verify_path(path, deep=True)
+
+    def publish_existing_repo(self, path: Path) -> None:
+        heading("Publish an existing local repository")
+        self.project = path
+        remotes = remote_urls(path)
+        if remotes:
+            warning("This repository already has a remote: " + ", ".join(remotes))
+            info("Use option 7 (scenario D) to compare histories, or option 8 to commit and push.")
+            return
+        branch = git_out(path, "symbolic-ref", "--short", "-q", "HEAD")
+        if not branch:
+            failure("Detached HEAD. Check out a branch before publishing.")
+            return
+        mode = ask(
+            "Publish by [c]reating a new GitHub repository or [a]dding an existing remote URL",
+            default="c",
+        ).lower()
+        if mode.startswith("a"):
+            url = ask("Existing remote URL (SSH or HTTPS)")
+            if not url or url.startswith("-"):
+                failure("A valid, non-option-looking URL is required.")
+                return
+            command = ["git", "remote", "add", "origin", url]
+            explain(
+                "Runs git remote add origin <URL>. This connects the existing local history "
+                "to a remote repository without creating or rewriting commits.",
+                "You may already have created the remote manually or be using a non-GitHub "
+                "host. The origin name is what the rest of the app and scenario D expect.",
+                "The app refuses to continue when a remote already exists. Nothing is pushed "
+                "until you confirm the next step.",
+            )
+            print("Command: " + col(shlex.join(command), "dim"))
+            if not confirm("Add this remote as origin?", True):
+                return
+            result = run_cmd(command, cwd=path, timeout=30)
+            if result.combined:
+                print(result.combined)
+            if result.returncode != 0:
+                failure("Could not add the remote.")
+                return
+            success(f"origin = {url}")
+            if confirm("Push the current branch and set upstream now?", True):
+                self.push_current(path)
+            return
+
+        if not ensure_gh(require_auth=True, offer_login=True):
+            return
+        has_commit = git(path, "rev-parse", "--verify", "--quiet", "HEAD").returncode == 0
+        entries = status_entries(path)
+        if entries:
+            explain(
+                "Publishing pushes commits, not uncommitted files. The app can review and "
+                "commit the current changes before creating the remote.",
+                "A remote only receives committed history. Creating the remote after the "
+                "commit avoids publishing an incomplete state.",
+                "The commit workflow scans for secrets and can be cancelled. No remote is "
+                "created unless the commit and the final confirmation both succeed.",
+            )
+            if confirm("Commit current changes before publishing?", True):
+                if not (path / ".gitignore").exists() and confirm(
+                    "Create a .gitignore before staging files?", True
+                ):
+                    ensure_gitignore(path)
+                if not self.commit_local(
+                    path,
+                    initial=not has_commit,
+                    success_message="Initial commit created." if not has_commit else "Commit created.",
+                ):
+                    info("No remote was created.")
+                    return
+                has_commit = True
+            elif not has_commit:
+                failure("This repository has no commits yet. Add files and create a commit first.")
+                return
+            else:
+                warning("Only existing commits will be published; uncommitted changes stay local.")
+        if not has_commit:
+            failure("This repository has no commits yet. Add files and create a commit first.")
+            info("Use option 8 to make the first commit, then return to option 6.")
+            return
+
+        default_name = re.sub(r"[^A-Za-z0-9._-]+", "-", path.name).strip("-") or "project"
+        repo_name = ask_repo_name("GitHub repository name", default=default_name)
+        visibility = ask_visibility("private")
+        description = ask("Description (optional)", allow_empty=True)
+        command = [
+            which_gh() or "gh",
+            "repo",
+            "create",
+            repo_name,
+            f"--{visibility}",
+            "--source",
+            ".",
+            "--remote",
+            "origin",
+            "--push",
+        ]
+        if description:
+            command.extend(["--description", description])
+        explain(
+            "gh repo create creates the GitHub repository, adds it as origin, and pushes "
+            "the selected local commit history.",
+            "This publishes an already-initialized local repository without re-initializing "
+            "Git or creating a nested repository.",
+            "If creation or push fails, local commits remain safe. The app never force-pushes.",
+        )
+        print("Command: " + col(shlex.join(command), "dim"))
+        if not confirm("Create the GitHub repository and push now?", True):
+            info("No remote was created. Local history is unchanged.")
+            return
+        result = run_cmd(command, cwd=path, timeout=300)
+        if result.combined:
+            print(result.combined)
+        if result.returncode != 0:
+            failure("GitHub repository creation or push failed.")
+            info("The local repository and commits are safe. No force was used. Fix the error and retry.")
             return
         success("Published to GitHub.")
         if confirm("Run a full verification now?", True):
@@ -3223,6 +4381,55 @@ class App:
 
     # -- commit and push ----------------------------------------------------
 
+    def commit_local(self, path: Path, initial: bool = False, success_message: str = "Commit created.") -> bool:
+        """Stage, review, and commit without pushing. Returns True on success."""
+        if not git_out(path, "symbolic-ref", "--short", "-q", "HEAD"):
+            failure("Detached HEAD. Check out a branch before committing.")
+            return False
+        operations = in_progress_operations(path)
+        if operations:
+            failure("A Git operation is in progress: " + ", ".join(operations))
+            info("Finish or safely abort it before committing.")
+            return False
+        if not identity_ready(path):
+            return False
+        if not stage_changes(path):
+            return False
+        if not review_staged_safety(path):
+            return False
+        print()
+        print(col("Staged changes:", "bold"))
+        print(git_out(path, "diff", "--cached", "--stat"))
+        show_staged_diff(path)
+        explain(
+            "git commit saves the staged snapshot as a new local commit with your message.",
+            "The commit is a checkpoint you can review, sign, and push. It does not upload "
+            "anything, so a signing or message problem does not affect the remote.",
+            "Only staged content is included. The secret scan already checked that content.",
+        )
+        prompt = "Initial commit message" if initial else "Commit message (leave empty to open editor)"
+        default = "Initial commit" if initial else ""
+        message = ask(prompt, default=default, allow_empty=True)
+        if not message and not sys.stdin.isatty():
+            failure("A commit message is required in a non-interactive session.")
+            return False
+        if message:
+            result = run_cmd(["git", "commit", "-m", message], cwd=path, timeout=180)
+            if result.combined:
+                print(result.combined)
+            if result.returncode != 0:
+                failure("Commit failed. Nothing was pushed.")
+                print_signing_help()
+                return False
+        else:
+            code = run_interactive(["git", "commit"], cwd=path)
+            if code != 0:
+                failure("Commit failed or was cancelled. Nothing was pushed.")
+                print_signing_help()
+                return False
+        success(success_message)
+        return True
+
     def commit_and_push_action(self) -> None:
         path = self.require_project()
         if path is None:
@@ -3241,40 +4448,8 @@ class App:
             if confirm("Push existing commits now?", False):
                 self.push_current(path)
             return
-        if not identity_ready(path):
+        if not self.commit_local(path):
             return
-        if not stage_changes(path):
-            return
-        if not review_staged_safety(path):
-            return
-        print()
-        print(col("Staged changes:", "bold"))
-        print(git_out(path, "diff", "--cached", "--stat"))
-        explain(
-            "git commit saves the staged snapshot as a new local commit with your message.",
-            "The commit is a checkpoint you can review, sign, and push. It does not upload "
-            "anything, so a signing or message problem does not affect the remote.",
-            "Only staged content is included. The secret scan already checked that content.",
-        )
-        message = ask("Commit message (leave empty to open editor)", default="", allow_empty=True)
-        if not message and not sys.stdin.isatty():
-            failure("A commit message is required in a non-interactive session.")
-            return
-        if message:
-            result = run_cmd(["git", "commit", "-m", message], cwd=path, timeout=180)
-            if result.combined:
-                print(result.combined)
-            if result.returncode != 0:
-                failure("Commit failed. Nothing was pushed.")
-                print_signing_help()
-                return
-        else:
-            code = run_interactive(["git", "commit"], cwd=path)
-            if code != 0:
-                failure("Commit failed or was cancelled. Nothing was pushed.")
-                print_signing_help()
-                return
-        success("Commit created.")
         if confirm("Push now (normal push, no force)?", True):
             self.push_current(path)
 
@@ -3294,8 +4469,8 @@ class App:
         explain(
             "git push uploads local commits to the remote branch. On the first push, -u "
             "also records that remote branch as the upstream for this local branch.",
-            "Pushing creates the shared copy on GitHub and lets other machines clone or "
-            "fetch your work. Upstream lets later pushes and pulls use the right branch.",
+            "Pushing creates the shared copy on the remote and lets other machines clone "
+            "or fetch your work. Upstream lets later pushes and pulls use the right branch.",
             "The app uses a normal push only. If the remote has commits you do not have, "
             "Git rejects the push and the app directs you to scenario D instead of forcing.",
         )
@@ -3883,7 +5058,8 @@ class App:
             print("  3) Create README.md")
             print("  4) Create .editorconfig")
             print("  5) Generate .env.example from .env (blank values only)")
-            print("  6) Create all safe missing files")
+            print("  6) Create .gitattributes")
+            print("  7) Create all safe missing files")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             changed = False
@@ -3900,11 +5076,14 @@ class App:
             elif choice == "5":
                 changed = ensure_env_example(path)
             elif choice == "6":
+                changed = ensure_gitattributes(path)
+            elif choice == "7":
                 changed = ensure_gitignore(path) or changed
                 changed = ensure_readme(path) or changed
                 if dockerfile_present(path):
                     changed = ensure_dockerignore(path) or changed
                 changed = ensure_editorconfig(path) or changed
+                changed = ensure_gitattributes(path) or changed
                 if (path / ".env").exists():
                     changed = ensure_env_example(path) or changed
             else:
@@ -3916,6 +5095,52 @@ class App:
                     print(status)
                 if confirm("Commit these file changes now?", False):
                     self.commit_and_push_action()
+
+    def history_secrets_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        explain(
+            "Walks reachable commit history, lists unique file blobs, and scans their "
+            "content for private-key and common token patterns.",
+            "A secret removed in a later commit still exists in the old commit. Working-tree "
+            "scanning cannot see it, and deleting the file does not remove it from history.",
+            "This is read-only. It is bounded by commit/blob/size limits, skips binary and "
+            "large blobs, and cannot prove that every possible custom secret is absent.",
+        )
+        if not confirm("Scan reachable Git history now?", True):
+            return
+        print(col("Scanning history (this can take a while on large repositories)...", "dim"))
+        sys.stdout.flush()
+        result = scan_history_secrets(path)
+        heading("History secret scan")
+        print(
+            f"  Commits scanned: {result['commits_scanned']}/{result['commits_total']}  "
+            f"Blobs scanned: {result['blobs_scanned']}/{result['blobs_total']}  "
+            f"Bytes: {format_size(int(result['bytes_scanned']))}"
+        )
+        findings = result.get("findings") or []
+        if findings:
+            high_risk = any(bool(item.get("high_risk")) for item in findings if isinstance(item, dict))
+            failure(f"Potential secrets found in {len(findings)} history location(s).")
+            for item in findings[:20]:
+                if not isinstance(item, dict):
+                    continue
+                line = int(item.get("line") or 0)
+                location = str(item.get("path")) + (f":{line}" if line else "")
+                print(
+                    f"  - {location} "
+                    f"({item.get('kind')}, blob {item.get('object')})"
+                )
+            print()
+            info("Rotate any real credential first. Then remove it from history with a dedicated tool such as git filter-repo.")
+            if high_risk:
+                info("A private-key header or sensitive filename was found; treat any associated credential as exposed until proven otherwise.")
+        else:
+            success("No common secret patterns found in the scanned history.")
+        if result.get("truncated"):
+            warning("History scan limits were reached; older or larger blobs were not fully scanned.")
+            print("  Limits: " + f"{result['max_commits']} commits, {result['max_blobs']} blobs, 2 MiB per blob.")
 
     # -- safety helpers -----------------------------------------------------
 
@@ -4036,6 +5261,23 @@ def worktree_mismatch(root: Path, paths: Sequence[str]) -> List[str]:
     if result.returncode != 0:
         return []
     return [item for item in result.out.split("\0") if item]
+
+
+def show_staged_diff(root: Path, max_lines: int = 200) -> None:
+    """Print a bounded reviewable diff of what will be committed."""
+    result = git(root, "diff", "--cached", "--no-color", "--", timeout=30)
+    if result.returncode != 0:
+        warning("Could not display the staged diff: " + one_line(result.combined))
+        return
+    lines = result.out.splitlines()
+    if not lines:
+        info("The staged diff is empty.")
+        return
+    print(col("Staged diff:", "bold"))
+    for line in lines[:max_lines]:
+        print(line)
+    if len(lines) > max_lines:
+        info(f"Diff truncated after {max_lines} lines. Use 'git diff --cached' to view the rest.")
 
 
 def unstage_paths(root: Path, paths: Sequence[str]) -> bool:
@@ -4292,6 +5534,50 @@ def cli_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cli_secrets(args: argparse.Namespace) -> int:
+    path = ask_path_from_arg(args.path)
+    root = detect_git_root(path)
+    if root is None:
+        message = f"Not a Git repository: {path}"
+        if args.json:
+            print(json.dumps({"error": message}, indent=2))
+        else:
+            failure(message)
+        return 2
+    result = scan_history_secrets(
+        root,
+        max_commits=args.max_commits,
+        max_blobs=args.max_blobs,
+    )
+    result.update({"app": APP, "version": VERSION, "path": str(root), "command": "secrets"})
+    findings = result.get("findings") or []
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        heading(f"History secret scan: {root}")
+        print(
+            f"  Commits scanned: {result['commits_scanned']}/{result['commits_total']}  "
+            f"Blobs scanned: {result['blobs_scanned']}/{result['blobs_total']}  "
+            f"Bytes: {format_size(int(result['bytes_scanned']))}"
+        )
+        if findings:
+            failure(f"Potential secrets found in {len(findings)} history location(s).")
+            for item in findings[:50]:
+                if isinstance(item, dict):
+                    line = int(item.get("line") or 0)
+                    location = str(item.get("path")) + (f":{line}" if line else "")
+                    print(
+                        f"  - {location} "
+                        f"({item.get('kind')}, blob {item.get('object')})"
+                    )
+            info("Rotate any real credential first; then consider history rewriting with git filter-repo.")
+        else:
+            success("No common secret patterns found in the scanned history.")
+        if result.get("truncated"):
+            warning("History scan limits were reached; older or larger blobs were not fully scanned.")
+    return 1 if findings else 0
+
+
 def ask_path_from_arg(value: str) -> Path:
     path = Path(os.path.expanduser(os.path.expandvars(value)))
     if not path.is_absolute():
@@ -4303,7 +5589,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=APP,
         description="Safe menu-driven Git/GitHub project assistant. Run without arguments for the menu.",
-        epilog="Examples: git-create check --offline; git-create scan ~/Projects --depth 3",
+        epilog="Examples: git-create check --offline; git-create scan ~/Projects --depth 3; git-create secrets .",
     )
     parser.add_argument("--version", action="version", version=f"{APP} {VERSION}")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colors")
@@ -4323,7 +5609,14 @@ def build_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument("--json", action="store_true", help="machine-readable output")
     scan_parser.set_defaults(func=cli_scan)
 
-    for subparser in (check_parser, scan_parser):
+    secrets_parser = subparsers.add_parser("secrets", help="scan reachable Git history for common secrets")
+    secrets_parser.add_argument("path", nargs="?", default=".", help="repository path (default: current directory)")
+    secrets_parser.add_argument("--json", action="store_true", help="machine-readable output")
+    secrets_parser.add_argument("--max-commits", type=int, default=500, help="maximum commits to inspect (default: 500)")
+    secrets_parser.add_argument("--max-blobs", type=int, default=2000, help="maximum unique blobs to scan (default: 2000)")
+    secrets_parser.set_defaults(func=cli_secrets)
+
+    for subparser in (check_parser, scan_parser, secrets_parser):
         subparser.add_argument(
             "--no-color",
             action="store_true",

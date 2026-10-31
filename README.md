@@ -2,9 +2,11 @@
 
 A safe, menu-driven Git and GitHub assistant for Linux. It is a **single
 Python file with no third-party dependencies**. It helps you create, clone,
-publish, verify, rename, commit, push, and diagnose projects without missing
-important Git settings, SSH signing configuration, secret files, or remote
-history problems.
+publish, verify, rename, branch, undo/revert, containerize, commit, push, and
+diagnose projects without missing important Git settings, SSH signing
+configuration, secret files, or remote history problems.
+
+Current version: **1.3.0**.
 
 The app is deliberately conservative:
 
@@ -128,9 +130,14 @@ Typical menu flow:
 3. Use **4**, **5**, or **6** to create, clone, or publish a repository.
 4. Use **8** for reviewed commits and normal pushes.
 5. Use **7** whenever local and remote histories may have diverged.
+6. Use **13** before publishing or sharing a repository that may have a secret
+   in its history.
+7. Use **14** to manage branches, **15** for undo/revert operations, and **16**
+   to generate a Dockerfile and GHCR publishing workflow.
 
-The app never changes a Git configuration automatically. The settings wizard
-shows a plan and asks for confirmation before writing anything.
+The app never changes your global Git configuration or project files without
+showing a plan and asking for confirmation. The settings wizard, file templates,
+publish flow, and rename flow all require explicit approval before writing.
 
 ## Git in plain English
 
@@ -182,7 +189,10 @@ explains the commands you will see.
 | `git fetch` | Downloads remote refs and objects without changing your branch. | Lets you compare local and remote history safely. |
 | `git pull --ff-only` | Fetches and fast-forwards the branch only if no merge is needed. | Updates a branch without creating an accidental merge commit. |
 | `git log` | Shows commit history. | Helps you understand what happened and compare histories. |
-| `git branch` | Lists or creates branch names. | The app creates a local backup branch before risky sync work. |
+| `git branch` / `git switch` | Lists, creates, switches, renames, or deletes branch names. | Organizes work without mixing unrelated commits. |
+| `git restore` | Restores working-tree files or unstages paths. | Provides controlled local undo with a backup patch for destructive discards. |
+| `git reset --soft` | Moves the local branch back while keeping changes staged. | Undoes an unpublished local commit without losing files. |
+| `git revert` | Creates a new commit that reverses an older commit. | Safely undoes shared history without force-pushing. |
 | `git remote -v` | Lists remote names and URLs. | Confirms where fetch and push will go. |
 | `git merge-base` | Finds the common ancestor of two histories. | Shows whether local and remote history are related. |
 | `git fsck` | Checks the integrity of the object database. | Detects missing or corrupt repository objects during deep verification. |
@@ -200,6 +210,10 @@ explains the commands you will see.
 - It explains what each global setting means in option **10 → 9**.
 - Option **12** contains the Git concepts, command explanations, scenarios,
   and safety rules in the terminal.
+- Option **13** explains why history scanning is different from scanning the
+  current files, and reports bounded results.
+- Options **14–16** explain branch operations, the difference between local
+  undo and shared-history revert, and what the generated Docker/GHCR files do.
 - Verification messages include a short reason and, where useful, the command
   that fixes the problem.
 
@@ -227,13 +241,17 @@ The command is printed after the explanation, immediately before execution.
 | `3` | Select the active project by path. |
 | `4` | **Scenario A**: create a new private/public GitHub repository with a README and clone it. |
 | `5` | **Scenario B**: clone an existing GitHub repository, or clone any Git URL. |
-| `6` | **Scenario C**: publish an existing local project: initialize, add safe files, review, sign, commit, create the GitHub repo, and push. |
+| `6` | **Scenario C**: publish a local project: initialize if needed, add safe files, review, sign, commit, create the GitHub repo, and push. If it is already a repository with no remote, it publishes the existing history or connects an existing remote URL. |
 | `7` | **Scenario D**: fetch and diagnose local/remote history. Creates an optional local backup branch. Never force-pushes. |
 | `8` | Commit and push: review changes, stage all or selected paths, scan secrets, sign, commit, and push normally. |
 | `9` | Rename the local folder and/or the GitHub repository, and optionally commit/push pending changes. |
 | `10` | Check and fix global Git/GitHub settings, SSH signing, allowed signers, and `gh` authentication. |
-| `11` | Check/add important project files: `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, and `.env.example`. |
+| `11` | Check/add important project files: `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, and `.env.example`. |
 | `12` | Help, Git concepts, command explanations, and the scenario guide. |
+| `13` | Scan reachable Git history for common private-key and token patterns. |
+| `14` | Branch management: list, create, switch, rename, delete local/remote branches, set upstream, show branch graph. |
+| `15` | Undo/revert helpers: unstage, discard local edits with a backup patch, safe revert commits, soft-undo unpublished commits. |
+| `16` | Create a starter Dockerfile, `.dockerignore`, and a GitHub Actions workflow that publishes to GHCR. |
 | `0` | Exit. |
 
 The defaults point at `~/Projects` when it exists. All paths are prompted, so
@@ -260,7 +278,7 @@ Choose **1** for the full verification. Full verification adds:
 - GitHub repository metadata and name comparison
 - whether the configured signing key is registered on GitHub
 - `git fsck` object connectivity
-- tracked-file secret scanning
+- tracked **and untracked** content secret scanning
 - `.env` file permission checks
 - large-file checks
 - Docker ignore coverage
@@ -337,7 +355,9 @@ gh api user/ssh_signing_keys
 | `LICENSE` | Informational; not generated automatically because the license is your choice. |
 | `.env.example` | Required when `.env` exists; can be generated with blank values. |
 | `.editorconfig` | Optional; template available. |
-| `.gitattributes` | Informational; useful for line endings and Git LFS. |
+| `.gitattributes` | Informational; template available for line endings and binary markers. |
+| `Dockerfile` | Informational; option 16 can generate a starter. |
+| `.github/workflows/ghcr.yml` | Informational; option 16 can generate GHCR publishing. |
 | `SECURITY.md` | Informational; useful for public projects. |
 | `.github/workflows/*.yml` | Informational; CI is optional. |
 
@@ -409,6 +429,19 @@ Unlike `git add -p`, the app stages selected paths non-interactively, but it
 shows the list and the staged diff before committing. This gives you the same
 review opportunity without a fragile terminal hunk editor.
 
+#### Already initialized locally, but no remote
+
+Option **6** also handles the common case where `git init` and commits already
+exist locally but no `origin` remote exists. It offers:
+
+- **create a new GitHub repository** — optionally commits pending changes,
+  then runs `gh repo create --source=. --remote=origin --push`
+- **add an existing remote URL** — runs `git remote add origin URL`, then
+  offers a normal push and upstream setup
+
+This closes the previous dead end where option 8 said "publish with scenario C"
+while scenario C only accepted folders that were not yet repositories.
+
 ### Scenario D: local and remote repositories already exist
 
 Menu option **7** is diagnostic first:
@@ -450,19 +483,140 @@ Menu option **8**:
    secret scan cannot approve different content from what will be committed.
 4. Scans staged filenames and content for private keys and common token
    patterns.
-5. Shows `git diff --cached --stat`.
+5. Shows `git diff --cached --stat` and a bounded full staged diff for review.
 6. Commits with your message, using SSH signing if configured.
 7. Pushes normally and sets upstream on the first push if needed.
 8. On a rejected push, stops and points to scenario D. It never force-pushes.
 
+### History secret scan
+
+Menu option **13** and the `secrets` command scan reachable Git history, not
+just the current files. This matters because deleting a secret in a new commit
+does not remove it from older commits.
+
+The scanner:
+
+- walks commits reachable from all refs
+- deduplicates file blobs
+- flags sensitive historical filenames such as `.env`, key files, and
+  credential files
+- checks common private-key, AWS, GitHub, Slack, Google, and OpenAI-style
+  patterns
+- skips binary files and blobs larger than 2 MiB
+- is bounded to 500 commits and 2000 blobs by default, with configurable CLI
+  limits
+- is read-only
+
+It is a guardrail, not a complete secret-history product. If it finds a real
+credential, rotate the credential first, then remove it from history with a
+dedicated tool such as `git filter-repo`.
+
+## Branch management
+
+Menu option **14** provides:
+
+- detailed local branch list with upstream and ahead/behind information
+- create a branch, with an optional immediate switch
+- switch to a local branch
+- switch to a remote branch by creating a local tracking branch
+- rename the current local branch
+- delete a local branch, with a safety ref and a second typed confirmation
+  before force-deleting an unmerged branch
+- delete an `origin` remote branch, with a typed confirmation and refusal to
+  delete the remote default branch
+- set or repair the upstream branch
+- show a decorated branch graph
+
+Branch names are validated with `git check-ref-format`. Branch switching is
+refused while a merge/rebase/cherry-pick/revert is in progress. Git itself
+refuses a switch that would overwrite conflicting local changes; the app never
+discards them automatically.
+
+Renaming a branch is **local only**. The remote branch is not renamed. The app
+keeps a safety ref under `refs/git-create-backups/` before rename/delete
+operations so commits stay reachable locally. Inspect them with
+`git for-each-ref refs/git-create-backups`; delete them with
+`git update-ref -d <ref>` once you no longer need the backup.
+
+## Undo and revert helpers
+
+Menu option **15** separates local file recovery from Git history changes:
+
+| Action | What it changes | Safety |
+| --- | --- | --- |
+| Show staged diff | Nothing | Read-only |
+| Unstage all | Index only | Working-tree files stay |
+| Discard unstaged edits | Working tree for selected tracked files | Writes a patch to `.git/git-create-backups/` first; requires typing `DISCARD` |
+| Revert a commit | Creates a new commit that reverses an old commit | Safe for shared history; can push normally; never force |
+| Undo last local commit | `git reset --soft HEAD^`, keeping changes staged | Fetches first, refuses if HEAD exists on a remote branch or tag, and creates a safety ref |
+
+“Revert both local and Git” therefore means:
+
+- **local file changes** are discarded with a backup patch and typed confirmation;
+  the patch can be re-applied with `git apply <patch>`
+- **local unpublished Git history** can be soft-undone
+- **remote/shared history** is reverted by a new revert commit, pushed normally,
+  never by force-pushing rewritten history
+
+If fetch fails, the soft undo is cancelled because the app cannot prove the
+commit is unpublished. If `git revert` conflicts, Git leaves the operation in
+progress. Resolve the conflict and run `git revert --continue`, or abort
+deliberately. The app does not auto-resolve conflicts.
+
+## Docker image and GHCR workflow
+
+Menu option **16** creates:
+
+- a starter `Dockerfile`
+- `.dockerignore` if missing
+- `.github/workflows/ghcr.yml`
+
+The container template can be:
+
+- Python
+- Node
+- static/nginx
+- generic Debian
+
+The Python template asks for the entrypoint and installs `requirements.txt` if
+present. Node uses `npm ci`/`npm install` and `npm start`. Static files use
+nginx. The generic template is intentionally marked with a TODO.
+
+The Python template installs Git and OpenSSH, but not GitHub CLI `gh`. Add
+`gh` yourself if the container needs GitHub authentication or repository
+operations. All templates are starters and should be reviewed before
+publishing.
+
+The generated workflow:
+
+- triggers on pushes to `main`, tags matching `v*`, and manual dispatch
+- requests `contents: read` and `packages: write`
+- logs in to `ghcr.io` with the built-in `GITHUB_TOKEN`
+- uses `docker/metadata-action` for branch, semantic-version, and SHA tags
+- builds and pushes with `docker/build-push-action`
+
+The app writes files only. It does not build or publish a container itself, and
+it does not store a registry token. The first GHCR package may be private by
+default; adjust its visibility in GitHub package settings. If the repository is
+renamed, update the image name in the workflow.
+
+### Generated file examples
+
+The repository includes sample generated files under
+[`examples/generated/`](examples/generated/). They are **showcase/documentation
+files only** and are not read by the script. They exist so you can inspect what
+the app creates before running it.
+
 ## Command line mode
 
-The menu is the primary interface, but non-interactive checks are available for
-scripts and CI:
+The menu is the primary interface. Branch management, undo/revert helpers, and
+Docker/GHCR generation are interactive menu actions. Non-interactive checks and
+scans are available for scripts and CI:
 
 ```bash
 git-create check [PATH] [--offline] [--json] [--strict]
 git-create scan [PATH] [--depth N] [--json]
+git-create secrets [PATH] [--json] [--max-commits N] [--max-blobs N]
 git-create --version
 git-create --help
 ```
@@ -476,6 +630,8 @@ git-create check . --json
 git-create check . --strict
 git-create scan ~/Projects --depth 3
 git-create scan . --json
+git-create secrets .
+git-create secrets . --json --max-commits 1000 --max-blobs 5000
 ```
 
 `check` exit codes:
@@ -484,18 +640,30 @@ git-create scan . --json
 - `1`: at least one failure, or a warning with `--strict`
 - `2`: path is not a Git repository or is invalid
 
+`secrets` exit codes:
+
+- `0`: no matching secret patterns found in the scanned history
+- `1`: matching patterns found
+- `2`: path is not a Git repository or is invalid
+
 `--offline` skips remote, GitHub API, and `git fsck` checks. JSON output has
 the same check sections and summary counts as the human-readable report.
+`secrets --json` includes commit/blob counts, limits, truncation state, and
+findings with path, line, kind, and blob ID.
 Global options `--no-color` and `--debug` are accepted before or after the
-subcommand. The `NO_COLOR` environment variable also disables colors.
+subcommand. `--debug` prints a Python traceback for unexpected errors. The
+`NO_COLOR` environment variable also disables colors.
 
 ## Safety model
 
 - **No force push.** The app never passes `--force` or `--force-with-lease`.
-- **No history rewrite.** It does not run `filter-repo`, `rebase -i`, `reset
-  --hard`, or `clean -fdx`.
-- **No destructive resets.** Staging can be cancelled. Risky staged paths are
-  unstaged without touching working-tree files.
+- **No shared-history rewrite.** It does not run `filter-repo`, `rebase -i`,
+  `reset --hard`, or `clean -fdx`. The explicit “undo last local commit”
+  helper uses `reset --soft` only when HEAD is not on any remote; remote
+  history is changed only by a new revert commit pushed normally.
+- **No hard resets.** Staging can be cancelled. Risky staged paths are unstaged
+  without touching working-tree files. The explicit local soft-undo keeps all
+  changes and refuses if the commit is on a remote.
 - **No silent secret commit.** Sensitive filenames and common secret patterns
   block the commit unless you deliberately type `COMMIT`.
 - **No silent file overwrite.** Templates are created only when missing.
@@ -503,7 +671,17 @@ subcommand. The `NO_COLOR` environment variable also disables colors.
   changes and asks for confirmation.
 - **Backups before divergence work.** Scenario D offers a local backup branch
   before any fast-forward pull.
-- **Read-only diagnosis.** Fetch is read-only. Push is a normal push.
+- **Read-only diagnosis.** Fetch and both secret scans are read-only. Push is a
+  normal push.
+- **History scanning is separate.** Working-tree checks do not imply that old
+  commits are clean; use option 13 or `git-create secrets`.
+- **Destructive local operations have backups.** Discarding unstaged edits
+  writes a patch under `.git/git-create-backups/`; branch rename/delete and
+  soft undo create safety refs under `refs/git-create-backups/`.
+- **Typed confirmations for destructive actions.** Discarding files, remote
+  branch deletion, and soft-undoing a commit require a typed phrase.
+- **Docker/GHCR generation changes files only.** It does not build an image or
+  push a package; the generated GitHub Actions workflow performs publishing.
 
 Secrets that were already pushed cannot be fixed by deleting the file in a new
 commit. Rotate the credential first, then consider history rewriting with a
@@ -523,6 +701,82 @@ dedicated tool.
 - `git fsck` is only run in full/deep verification.
 - Menu actions are non-interactive where possible, so SSH keys with
   passphrases should be loaded into `ssh-agent` before pushing.
+- History scanning only covers reachable commits and bounded blobs; unreachable
+  reflog objects and files larger than 2 MiB are not fully scanned. Commit
+  messages and binary blobs are not content-scanned.
+- Publish, push, and scenario D flows expect a remote named `origin`. Other
+  remote names are inspected and reported, but are not used automatically.
+
+## What the app does not do
+
+The menu intentionally focuses on safe setup, verification, publishing,
+branching, recovery, and container publishing. It does **not** currently
+provide:
+
+- stash save/pop/drop
+- commit amend or interactive hunk staging
+- tag creation, signed tags, releases, or changelogs
+- pull requests, issues, reviews, or GitHub organization management
+- generic remote add/remove/edit outside the publish-existing flow
+- GitHub branch protection or Actions secret management
+- automatic merge/rebase of diverged histories
+- history rewriting, garbage collection, or repository size cleanup
+- automatic license selection, general-purpose CI pipelines, or security-policy generation
+- multi-account `gh` switching
+- remote branch rename or full remote branch management beyond `origin`
+- verifying that the generated GHCR workflow actually built successfully
+
+Those are deliberate scope boundaries, not hidden features. Any future addition
+should preserve the same confirmation and secret-scanning rules.
+
+## Network access and privacy
+
+The app has no server, telemetry, database, or separate state directory. It
+stores no credentials.
+
+Network activity only happens when you choose an action that needs it:
+
+- `git fetch`, `git pull`, `git push`, and `git ls-remote`
+- `gh` authentication, repository creation/cloning/renaming, and GitHub API
+  reads
+- optional GitHub signing-key registration checks
+
+Local checks, scans, settings inspection, and history scanning do not use the
+network. `check --offline` avoids remote and GitHub checks. Commands run under
+your own Git/SSH/`gh` identity. The generated GHCR workflow uses GitHub Actions
+and `GITHUB_TOKEN` on GitHub; the local app does not publish an image or store
+a registry password.
+
+## Updating and uninstalling
+
+The app is a single file, so updating means replacing it:
+
+```bash
+# from this repository
+git pull --ff-only
+chmod +x git-create
+```
+
+If you installed a symlink:
+
+```bash
+ln -sfn "$(pwd)/git-create" ~/.local/bin/git-create
+```
+
+To uninstall, remove the file or symlink:
+
+```bash
+rm ~/.local/bin/git-create
+# or, if you copied it:
+rm ~/bin/git-create
+```
+
+There is no package manager, background service, telemetry, or separate app
+state directory. Safety backups live inside the repository's `.git` directory
+(`.git/git-create-backups/` and `refs/git-create-backups/`). The app may create
+standard Git configuration and an `allowed_signers` file only when you
+explicitly approve the settings wizard; those live in your normal Git
+configuration locations.
 
 ## Troubleshooting
 
@@ -577,6 +831,53 @@ Review the file. If it is definitely a harmless fixture and you intend to
 publish it, the commit flow asks you to type `COMMIT`. Otherwise cancel; risky
 paths are unstaged automatically.
 
+### Repository has no `origin` remote
+
+Use option **6**. For an already initialized repository it offers to create a
+new GitHub repository or attach an existing remote URL, then push normally.
+This is the supported path when option 8 reports that no origin exists.
+
+### Commit or push says a Git operation is in progress
+
+A merge, rebase, cherry-pick, revert, or bisect is unfinished. Complete it with
+the normal Git commands, or abort it deliberately. The app refuses to commit or
+push through an unfinished operation to avoid surprising results.
+
+### `index.lock` exists
+
+Another Git process may still be running, or Git may have exited abnormally.
+Confirm no Git process is active before deleting `.git/index.lock`. The
+verification report only warns; it never removes the lock.
+
+### Branch switch is blocked
+
+Uncommitted changes would be overwritten or a merge/rebase is in progress.
+Commit or stash the changes, or finish/abort the operation. The app does not
+discard the changes for you.
+
+### A revert command conflicted
+
+Git left the revert in progress. Resolve the conflicted files and run
+`git revert --continue`, or run `git revert --abort` to stop deliberately.
+The app reports the failure and does not force a result.
+
+### GHCR workflow does not publish
+
+Check:
+
+- GitHub Actions is enabled for the repository.
+- Workflow permissions allow package writes, or the workflow's
+  `packages: write` permission is preserved.
+- The image name is lowercase and matches the repository/package namespace.
+- The first package's visibility and access settings in GitHub Packages.
+- The workflow run logs for build or registry authentication errors.
+
+### Remote branch deletion or push is rejected
+
+Branch protection, repository permissions, or a stale remote can block it.
+The app uses a normal push/delete, never force. Fix permissions or fetch/prune
+and compare histories with scenario D.
+
 ## Development and validation
 
 The application is intentionally one file. There is no build system and no
@@ -594,6 +895,8 @@ Run the non-interactive self-check:
 ./git-create check --offline
 ./git-create check --offline --json | python3 -m json.tool
 ./git-create scan . --depth 2
+./git-create secrets .
+./git-create secrets . --json | python3 -m json.tool
 ```
 
 Run the menu:
@@ -613,12 +916,16 @@ HOME="$tmp" ./git-create
 ## Repository layout
 
 ```text
-git-create      # the complete application (Python, executable)
-README.md       # this documentation
-.gitignore      # repository hygiene for the app itself
-.dockerignore   # keeps the Docker context clean if one is ever added
-.editorconfig   # consistent indentation and line endings across editors
+git-create              # the complete application (Python, executable)
+README.md               # this documentation
+.gitignore              # repository hygiene for the app itself
+.dockerignore           # keeps the Docker context clean if one is ever added
+.editorconfig           # consistent indentation and line endings across editors
+examples/generated/     # showcase copies of generated files (not runtime deps)
 ```
 
 The application is still distributed as the single `git-create` file. The
-README and `.gitignore` are repository files, not runtime dependencies.
+README, ignore/editor files, and `examples/` are repository files, not runtime
+dependencies. The app never uses `examples/` as templates or configuration.
+Like any other project content, example files may be included in secret and
+history scans.
