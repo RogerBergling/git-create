@@ -83,6 +83,8 @@ class GitCreateTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertEqual(payload["summary"]["FAIL"], 0)
         self.assertIn("sections", payload)
+        self.assertIn("build", payload)
+        self.assertIn("built_at", payload)
 
     def test_info_json(self) -> None:
         repo = self.make_repo()
@@ -155,7 +157,11 @@ class GitCreateTests(unittest.TestCase):
         changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
         self.assertIn(f"Current version: **{version}**.", readme)
         self.assertIn(f"## {version}", changelog)
-        self.assertEqual(self.run_app("--version").stdout.strip(), f"git-create {version}")
+        output = self.run_app("--version").stdout.strip()
+        self.assertIn(f"git-create {version}", output)
+        self.assertIn(mod["BUILD_NUMBER"], output)
+        self.assertIn(mod["BUILD_DATE"], output)
+        self.assertIn(mod["BUILD_TIME"], output)
 
     def test_backup_refs_are_unique(self) -> None:
         import runpy

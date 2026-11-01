@@ -105,6 +105,17 @@ class InteractiveTests(unittest.TestCase):
         os.environ["GH_SECRET"] = str(secret)
         return log, payload, secret
 
+    def test_main_menu_shows_version_and_build_metadata(self) -> None:
+        mod = self.load()
+        app = mod["App"]()
+        app.project = self.repo
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            app.print_menu()
+        rendered = output.getvalue()
+        for value in (mod["VERSION"], mod["BUILD_NUMBER"], mod["BUILD_DATE"], mod["BUILD_TIME"]):
+            self.assertIn(value, rendered)
+
     def test_remote_add_and_remove(self) -> None:
         mod = self.load()
         remote = Path(self.temp.name) / "remote.git"

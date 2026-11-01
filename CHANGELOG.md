@@ -2,6 +2,11 @@
 
 All notable changes to `git-create` are recorded here.
 
+## 1.9.0
+
+- Added version, build number, build date, and build time to the main menu,
+  `--version`, verification output, and JSON report metadata.
+
 ## 1.8.0
 
 - Scenario A now creates an empty GitHub repository, builds README.md and

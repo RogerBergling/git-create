@@ -6,7 +6,10 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.8.0**.
+Current version: **1.9.0**. Build **20261101.1114**, built **2026-11-01 11:14**.
+
+The main menu shows the version, build number, and build timestamp on every
+render. `git-create --version` prints the same build metadata.
 
 [![CI](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml/badge.svg)](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml)
 
@@ -990,6 +993,8 @@ git-create secrets [PATH] [--json] [--max-commits N] [--max-blobs N]
 git-create --version
 git-create --help
 ```
+
+`--version` prints the version, build number, and build date/time.
 
 Examples:
 

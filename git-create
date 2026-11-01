@@ -32,7 +32,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 APP = "git-create"
-VERSION = "1.8.0"
+VERSION = "1.9.0"
+BUILD_NUMBER = "20261101.1114"
+BUILD_DATE = "2026-11-01"
+BUILD_TIME = "11:14"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -696,6 +699,8 @@ class Report:
         return {
             "app": APP,
             "version": VERSION,
+            "build": BUILD_NUMBER,
+            "built_at": f"{BUILD_DATE} {BUILD_TIME}",
             "title": self.title,
             "meta": self.meta,
             "summary": self.counts(),
@@ -739,7 +744,7 @@ def print_check(check: Check, show_hint: bool = True) -> None:
 def print_report(report: Report, only_problems: bool = False) -> None:
     print()
     print(col(report.title, "bold"))
-    print(col(f"{APP} {VERSION}", "dim"))
+    print(col(f"{APP} {VERSION} · build {BUILD_NUMBER} · {BUILD_DATE} {BUILD_TIME}", "dim"))
     for section in report.sections:
         visible = [
             check
@@ -2809,6 +2814,8 @@ def combined_report(
         {
             "app": APP,
             "version": VERSION,
+            "build": BUILD_NUMBER,
+            "built_at": f"{BUILD_DATE} {BUILD_TIME}",
             "path": str(path),
             "deep": deep,
             "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -3558,6 +3565,7 @@ class App:
     def run(self) -> int:
         print()
         print(col(f"{APP} {VERSION}", "bold") + col(" - safe Git/GitHub project assistant", "dim"))
+        print(col(f"Build {BUILD_NUMBER} · {BUILD_DATE} {BUILD_TIME}", "dim"))
         if self.project:
             print("Active project: " + col(str(self.project), "cyan"))
         else:
@@ -3638,6 +3646,14 @@ class App:
     def print_menu(self) -> None:
         print()
         print(col("Active project", "bold") + ": " + self.project_summary())
+        print(
+            col("Version", "bold")
+            + f": {VERSION}  "
+            + col("Build", "bold")
+            + f": {BUILD_NUMBER}  "
+            + col("Built", "bold")
+            + f": {BUILD_DATE} {BUILD_TIME}"
+        )
         print(col("Dry-run mode: ", "bold") + (col("ON", "yellow") if self.dry_run else "off"))
         print(col("-" * 78, "dim"))
         items = [
@@ -9028,7 +9044,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Safe menu-driven Git/GitHub project assistant. Run without arguments for the menu.",
         epilog="Examples: git-create check --offline; git-create info --json; git-create audit --json; git-create scan ~/Projects --depth 3; git-create secrets .",
     )
-    parser.add_argument("--version", action="version", version=f"{APP} {VERSION}")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"{APP} {VERSION} · build {BUILD_NUMBER} · {BUILD_DATE} {BUILD_TIME}",
+    )
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colors")
     parser.add_argument("--dry-run", action="store_true", help="show worktree/submodule/remote/backup commands without executing them")
     parser.add_argument("--debug", action="store_true", help="show Python tracebacks on unexpected errors")
