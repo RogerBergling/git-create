@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.7.0**.
+Current version: **1.8.0**.
 
 [![CI](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml/badge.svg)](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml)
 

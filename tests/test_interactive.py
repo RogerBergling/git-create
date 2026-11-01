@@ -274,6 +274,18 @@ class InteractiveTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(calls[0]), 2)
 
+    def test_verification_offers_missing_gitignore_fix(self) -> None:
+        mod = self.load()
+        app = mod["App"]()
+        app.project = self.repo
+        report = mod["build_project_report"](self.repo, deep=False, scan_content=False)
+        self.patch_globals(
+            mod["App"].offer_fixes,
+            confirm=lambda prompt, default=False: "Create the missing .gitignore" in prompt,
+        )
+        app.offer_fixes(report)
+        self.assertTrue((self.repo / ".gitignore").is_file())
+
     def test_batch_safe_file_fixes(self) -> None:
         mod = self.load()
         app = mod["App"]()

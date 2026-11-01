@@ -2,11 +2,13 @@
 
 All notable changes to `git-create` are recorded here.
 
-## Unreleased
+## 1.8.0
 
 - Scenario A now creates an empty GitHub repository, builds README.md and
   .gitignore locally, signs the initial commit, and pushes it instead of
   starting from a GitHub web-created README commit.
+- Verification offers to create a missing .gitignore directly and prints the
+  running git-create version so stale copies are easy to identify.
 - HEAD-signature verification now falls back to GitHub's commit verification for
   GitHub-signed commits that are not in the local allowed_signers file.
 - `.dockerignore` is informational when no Dockerfile exists, and batch fix no

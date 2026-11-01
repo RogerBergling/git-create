@@ -32,7 +32,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 APP = "git-create"
-VERSION = "1.7.0"
+VERSION = "1.8.0"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -739,6 +739,7 @@ def print_check(check: Check, show_hint: bool = True) -> None:
 def print_report(report: Report, only_problems: bool = False) -> None:
     print()
     print(col(report.title, "bold"))
+    print(col(f"{APP} {VERSION}", "dim"))
     for section in report.sections:
         visible = [
             check
@@ -2804,7 +2805,15 @@ def combined_report(
 ) -> Report:
     config = config if config is not None else read_global_config()
     report = Report(f"Verification: {path.name}")
-    report.meta.update({"path": str(path), "deep": deep, "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    report.meta.update(
+        {
+            "app": APP,
+            "version": VERSION,
+            "path": str(path),
+            "deep": deep,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+    )
     report.extend(build_global_report(config, deep=deep))
     report.extend(build_project_report(path, deep=deep, scan_content=scan_content, global_config=config))
     return report
@@ -3792,7 +3801,9 @@ class App:
                 """\
                 A) New private GitHub repository, then clone it
                    Best when you have no code yet and want a safe starting point.
-                   gh repo create NAME --private --add-readme --clone
+                   gh repo create NAME --private --clone
+                   then create README.md/.gitignore, sign the initial commit,
+                   and push it normally.
 
                 B) Clone a repository that already exists
                    gh repo clone OWNER/REPO
@@ -3955,12 +3966,28 @@ class App:
             if section.title.startswith("Global")
             for check in section.checks
         )
-        files_problem = any(
-            check.level in ("FAIL", "WARN")
+        file_problems = [
+            check
             for section in report.sections
             if section.title in ("Important files", "Ignore rules")
             for check in section.checks
+            if check.level in ("FAIL", "WARN")
+        ]
+        files_problem = bool(file_problems)
+        missing_gitignore = any(
+            check.level == "FAIL" and check.label == ".gitignore" for check in file_problems
         )
+        if missing_gitignore:
+            root_text = str(report.meta.get("path") or "")
+            if root_text and confirm("Create the missing .gitignore now?", True):
+                if ensure_gitignore(Path(root_text), ask_first=False, confirm_changes=False):
+                    success("Created .gitignore. Review and commit it before making another commit.")
+                    file_problems = [
+                        check
+                        for check in file_problems
+                        if check.label not in (".gitignore", ".gitignore coverage")
+                    ]
+                    files_problem = bool(file_problems)
         if global_problem and confirm("Open the global settings wizard now?", False):
             self.settings_action()
         if files_problem and confirm("Open the project-files wizard now?", False):
