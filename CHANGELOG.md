@@ -4,6 +4,8 @@ All notable changes to `git-create` are recorded here.
 
 ## Unreleased
 
+- Added an arrow-key directory picker with up/down navigation, go-up,
+  select-current, type-path, hidden-directory, and cancel controls.
 - Added batch actions after a folder scan: status, verify all, apply safe
   project-file fixes, fast-forward pull, and normal push across eligible
   repositories.

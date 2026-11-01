@@ -353,7 +353,7 @@ class InteractiveTests(unittest.TestCase):
             mod["App"].worktrees_action,
             ask=ask,
             confirm=lambda p, d=False: True,
-            ask_path=lambda prompt, default=None: worktree,
+            ask_path=lambda prompt, default=None, **kwargs: worktree,
         )
         app.worktrees_action()
         self.assertFalse(worktree.exists())
@@ -428,7 +428,7 @@ class InteractiveTests(unittest.TestCase):
             mod["App"].worktrees_action,
             ask=ask,
             confirm=lambda p, d=False: True,
-            ask_path=lambda prompt, default=None: worktree,
+            ask_path=lambda prompt, default=None, **kwargs: worktree,
         )
         app.worktrees_action()
         self.assertFalse(worktree.exists())

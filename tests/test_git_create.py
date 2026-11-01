@@ -168,6 +168,19 @@ class GitCreateTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
 
+    def test_path_resolution_and_text_fallback(self) -> None:
+        import runpy
+
+        repo = self.make_repo()
+        mod = runpy.run_path(str(APP), run_name="git_create_path_test")
+        paths = mod["resolve_user_paths"](f"{repo}, {repo.parent}")
+        self.assertEqual(paths[0], repo.resolve())
+        self.assertEqual(paths[1], repo.parent.resolve())
+        globals_dict = mod["ask_path"].__globals__
+        globals_dict["choose_directory"] = lambda start, prompt: None
+        globals_dict["ask"] = lambda prompt, default=None, allow_empty=False: str(repo)
+        self.assertEqual(mod["ask_path"]("Directory"), repo.resolve())
+
     def test_exclusive_private_write(self) -> None:
         import runpy
 

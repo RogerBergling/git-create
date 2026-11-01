@@ -2830,28 +2830,241 @@ def ask_email(prompt: str, default: Optional[str] = None) -> str:
         warning("That does not look like a valid email address.")
 
 
-def ask_path(prompt: str, default: Optional[Path] = None) -> Path:
-    default_text = str(default) if default else None
-    raw = ask(prompt, default=default_text)
+def resolve_user_path(raw: str) -> Path:
     path = Path(os.path.expanduser(os.path.expandvars(raw)))
     if not path.is_absolute():
         path = Path.cwd() / path
     return path.resolve()
 
 
-def ask_scan_paths(prompt: str, default: Optional[Path] = None) -> List[Path]:
-    default_text = str(default) if default else None
-    raw = ask(prompt, default=default_text)
+def resolve_user_paths(raw: str) -> List[Path]:
     paths: List[Path] = []
+    seen = set()
     for part in re.split(r"[,;]", raw):
         part = part.strip()
         if not part:
             continue
-        path = Path(os.path.expanduser(os.path.expandvars(part)))
-        if not path.is_absolute():
-            path = Path.cwd() / path
-        paths.append(path.resolve())
+        path = resolve_user_path(part)
+        if str(path) not in seen:
+            seen.add(str(path))
+            paths.append(path)
     return paths
+
+
+def short_path(path: Path) -> str:
+    text = str(path)
+    home = str(HOME)
+    if text == home:
+        return "~"
+    if text.startswith(home + os.sep):
+        return "~" + text[len(home) :]
+    return text
+
+
+def read_picker_key(descriptor: int, select_module) -> str:
+    data = os.read(descriptor, 1)
+    if not data:
+        return "escape"
+    if data == b"\x1b":
+        if not select_module.select([descriptor], [], [], 0.1)[0]:
+            return "escape"
+        second = os.read(descriptor, 1)
+        if second not in (b"[", b"O"):
+            return "escape"
+        sequence = data + second
+        while len(sequence) < 8 and select_module.select([descriptor], [], [], 0.1)[0]:
+            part = os.read(descriptor, 1)
+            sequence += part
+            if part.isalpha() or part == b"~":
+                break
+        return {
+            b"\x1b[A": "up",
+            b"\x1b[B": "down",
+            b"\x1b[C": "right",
+            b"\x1b[D": "left",
+            b"\x1b[5~": "pageup",
+            b"\x1b[6~": "pagedown",
+            b"\x1b[H": "home",
+            b"\x1b[F": "end",
+            b"\x1b[1~": "home",
+            b"\x1b[4~": "end",
+            b"\x1bOA": "up",
+            b"\x1bOB": "down",
+            b"\x1bOC": "right",
+            b"\x1bOD": "left",
+        }.get(sequence, "escape")
+    if data in (b"\r", b"\n"):
+        return "enter"
+    if data in (b"\x7f", b"\x08"):
+        return "back"
+    try:
+        return data.decode("utf-8", "ignore").lower()
+    except UnicodeDecodeError:
+        return ""
+
+
+def choose_directory(start: Path, prompt: str) -> Optional[Tuple[str, Optional[Path]]]:
+    """Arrow-key directory picker. Returns (action, path) or None if unsupported."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    try:
+        import select as select_module
+        import termios
+        import tty
+    except ImportError:
+        return None
+    candidate = start if start.exists() and start.is_dir() else (start.parent if start else Path.cwd())
+    if not candidate.exists() or not candidate.is_dir():
+        candidate = Path.cwd()
+    current = candidate.resolve()
+    show_hidden = False
+    selected = 0
+    offset = 0
+    descriptor = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(descriptor)
+    try:
+        tty.setcbreak(descriptor)
+        sys.stdout.write("\x1b[?25l")
+        while True:
+            entries: List[Tuple[str, Path]] = []
+            if current.parent != current:
+                entries.append(("..", current.parent))
+            try:
+                children = sorted(
+                    (
+                        child
+                        for child in current.iterdir()
+                        if child.is_dir() and (show_hidden or not child.name.startswith("."))
+                    ),
+                    key=lambda child: child.name.lower(),
+                )
+            except OSError as exc:
+                children = []
+                read_error = str(exc)
+            else:
+                read_error = ""
+            entries.extend((child.name + "/", child) for child in children)
+            if entries:
+                selected = max(0, min(selected, len(entries) - 1))
+                window = max(1, shutil.get_terminal_size((100, 24)).lines - 8)
+                if selected < offset:
+                    offset = selected
+                if selected >= offset + window:
+                    offset = selected - window + 1
+            else:
+                selected = offset = 0
+                window = 1
+            lines = [
+                prompt,
+                "Current: " + short_path(current),
+                "",
+            ]
+            for index in range(offset, min(len(entries), offset + window)):
+                label, _target = entries[index]
+                marker = ">" if index == selected else " "
+                lines.append(f"  {marker} {label}")
+            if not children:
+                lines.append("    (no subdirectories)")
+            if read_error:
+                lines.append("    Could not read this directory: " + read_error)
+            lines.append("")
+            lines.append("Up/Down move  Enter/Right open  Left/Backspace up")
+            lines.append("S select this directory  T type a path  H hidden  Q cancel")
+            sys.stdout.write("\x1b[2J\x1b[H" + "\n".join(lines))
+            sys.stdout.flush()
+            key = read_picker_key(descriptor, select_module)
+            if key == "up":
+                selected = max(0, selected - 1)
+            elif key == "down":
+                selected = min(max(0, len(entries) - 1), selected + 1)
+            elif key == "pageup":
+                selected = max(0, selected - window)
+            elif key == "pagedown":
+                selected = min(max(0, len(entries) - 1), selected + window)
+            elif key == "home":
+                selected = 0
+            elif key == "end":
+                selected = max(0, len(entries) - 1)
+            elif key in ("enter", "right"):
+                if not entries:
+                    return ("select", current)
+                label, target = entries[selected]
+                current = target.resolve()
+                selected = 0
+                offset = 0
+            elif key in ("left", "back"):
+                if current.parent != current:
+                    current = current.parent
+                    selected = 0
+                    offset = 0
+            elif key == "s":
+                return ("select", current)
+            elif key == "t":
+                return ("type", None)
+            elif key == "h":
+                show_hidden = not show_hidden
+                selected = 0
+                offset = 0
+            elif key in ("q", "escape"):
+                return ("cancel", None)
+    finally:
+        try:
+            termios.tcsetattr(descriptor, termios.TCSADRAIN, old_settings)
+        except OSError:
+            pass
+        sys.stdout.write("\x1b[?25h\x1b[2J\x1b[H")
+        sys.stdout.flush()
+
+
+def ask_path(prompt: str, default: Optional[Path] = None, new_path: bool = False) -> Path:
+    start = default if default and default.exists() and default.is_dir() else (default.parent if default else Path.cwd())
+    picked = choose_directory(start, prompt)
+    if picked is not None:
+        action, selected = picked
+        if action == "cancel":
+            raise KeyboardInterrupt
+        if action == "select":
+            if new_path:
+                default_name = default.name if default else ""
+                name = ask("New name", default=default_name).strip()
+                if not name:
+                    name = default_name
+                if not name:
+                    failure("A name is required.")
+                    raise KeyboardInterrupt
+                return (selected / name).resolve()
+            return selected or start
+        # "type" falls through to the text prompt.
+    raw = ask(prompt, default=str(default) if default else None)
+    return resolve_user_path(raw)
+
+
+def ask_scan_paths(prompt: str, default: Optional[Path] = None) -> List[Path]:
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        paths: List[Path] = []
+        start = default if default and default.exists() and default.is_dir() else (default.parent if default else Path.cwd())
+        while True:
+            picked = choose_directory(start, prompt)
+            if picked is None:
+                break
+            action, selected = picked
+            if action == "cancel":
+                if paths:
+                    break
+                raise KeyboardInterrupt
+            if action == "type":
+                raw = ask("Folder path", default=str(start))
+                paths.extend(resolve_user_paths(raw))
+            elif selected:
+                if str(selected) not in {str(item) for item in paths}:
+                    paths.append(selected)
+                start = selected
+            if not confirm("Add another folder?", False):
+                break
+        if paths:
+            return paths
+    raw = ask(prompt, default=str(default) if default else None)
+    return resolve_user_paths(raw)
 
 
 def confirm(prompt: str, default: bool = False) -> bool:
@@ -3635,6 +3848,11 @@ class App:
                    clean repositories, and 'u' pushes repositories that are ahead
                    and not diverged. Batch pull/push skip dirty, detached,
                    upstream-less, or in-progress repositories and never force.
+
+                Directory picker
+                   Path prompts use an arrow-key picker: Up/Down move, Enter/Right
+                   open, Left/Backspace go up, S select, T type a path, H hidden,
+                   Q cancel. Non-interactive terminals use the text prompt.
                 """
             )
         )
@@ -5430,7 +5648,7 @@ class App:
                 print(git_out(path, "worktree", "list") or "(no worktrees)")
             elif choice == "2":
                 default_path = path.parent / f"{path.name}-worktree"
-                target = ask_path("New worktree path", default=default_path)
+                target = ask_path("New worktree path", default=default_path, new_path=True)
                 if target.exists():
                     failure(f"Target already exists: {target}")
                     continue

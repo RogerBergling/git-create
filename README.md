@@ -17,6 +17,7 @@ Current version: **1.7.0**.
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
+- [Interactive directory picker](#interactive-directory-picker)
 - [Screenshots](#screenshots)
 - [Git in plain English](#git-in-plain-english)
 - [What each command does and why](#what-each-command-does-and-why)
@@ -61,6 +62,30 @@ The app is deliberately conservative:
 - no automatic merge/rebase of diverged histories
 - no overwriting existing project files
 - no silent commits containing `.env`, keys, tokens, or other secrets
+
+## Interactive directory picker
+
+When the app asks for a directory in an interactive terminal, it opens a
+full-screen picker instead of requiring the path to be typed.
+
+| Key | Action |
+| --- | --- |
+| Up / Down | Move the selection |
+| Enter or Right | Open the selected directory |
+| Left or Backspace | Go up one directory |
+| `s` | Select the current directory |
+| `t` | Type a path instead |
+| `h` | Show or hide hidden directories |
+| `q` / Escape | Cancel |
+
+The picker starts at the active project, the previous default, or the current
+directory. Selecting `..` also goes up. The directory list is paginated to fit
+the terminal.
+
+Scan prompts can select multiple folders: after each selection, answer
+**Add another folder?** with `y` to pick another. Non-interactive terminals fall
+back to the plain text prompt, where multiple folders can be separated with
+commas.
 
 ## Screenshots
 
@@ -354,7 +379,8 @@ The command is printed after the explanation, immediately before execution.
 | `24` | Toggle dry-run mode for worktree, submodule, remote, and backup-cleanup changes. |
 | `0` | Exit. |
 
-The defaults point at `~/Projects` when it exists. All paths are prompted, so
+The defaults point at `~/Projects` when it exists. Directory prompts use the
+arrow-key picker when the terminal supports it, with a typed-path fallback, so
 the script can live anywhere and work with repositories anywhere.
 
 ## Automatic checks on every run
