@@ -168,6 +168,18 @@ class GitCreateTests(unittest.TestCase):
         self.assertIsNotNone(second)
         self.assertNotEqual(first, second)
 
+    def test_optional_dockerignore_and_safe_fix_plan(self) -> None:
+        import runpy
+
+        repo = self.make_repo()
+        mod = runpy.run_path(str(APP), run_name="git_create_dockerignore_test")
+        report = mod["build_project_report"](repo, deep=False, scan_content=False)
+        checks = {check.label: check for check in report.checks()}
+        self.assertEqual(checks[".dockerignore"].level, "INFO")
+        self.assertNotIn(".dockerignore", mod["safe_file_fix_plan"](repo))
+        (repo / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        self.assertIn(".dockerignore", mod["safe_file_fix_plan"](repo))
+
     def test_path_resolution_and_text_fallback(self) -> None:
         import runpy
 

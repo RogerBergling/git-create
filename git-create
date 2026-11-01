@@ -1124,6 +1124,24 @@ def fetch_github_signing_keys() -> Tuple[Optional[List[dict]], str]:
     return [item for item in data if isinstance(item, dict)], ""
 
 
+def github_commit_verification(root: Path, owner: str, repo: str, sha: str) -> Optional[Dict[str, object]]:
+    gh = which_gh()
+    if not gh:
+        return None
+    result = run_cmd(
+        [gh, "api", f"repos/{owner}/{repo}/commits/{sha}", "--jq", ".verification"],
+        cwd=root,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        data = json.loads(result.out)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def gh_repo_info(root: Path) -> Tuple[Optional[dict], str]:
     gh = which_gh()
     if not gh:
@@ -2374,9 +2392,26 @@ def build_project_report(
             signer = sig_parts[1] if len(sig_parts) > 1 else ""
             short_hash = sig_parts[2] if len(sig_parts) > 2 else ""
             subject = one_line(sig_parts[3], 70) if len(sig_parts) > 3 else ""
+            github_verified: Optional[Dict[str, object]] = None
+            if deep and github_remote and status_code in ("E", "U"):
+                head_sha = git_out(root, "rev-parse", "HEAD")
+                if head_sha:
+                    github_verified = github_commit_verification(
+                        root, github_remote[0], github_remote[1], head_sha
+                    )
             if status_code == "G":
                 repository.checks.append(
                     Check("PASS", "HEAD signature", f"good signature by {signer or 'unknown signer'} ({short_hash} {subject})")
+                )
+            elif github_verified and github_verified.get("verified"):
+                reason = str(github_verified.get("reason") or "verified")
+                repository.checks.append(
+                    Check(
+                        "PASS",
+                        "HEAD signature",
+                        f"verified by GitHub ({reason}) ({short_hash} {subject})",
+                        "The signer is not in the local allowed_signers file; GitHub verified this commit.",
+                    )
                 )
             elif status_code == "U":
                 repository.checks.append(
@@ -2539,10 +2574,10 @@ def build_project_report(
     else:
         files.checks.append(
             Check(
-                "WARN",
+                "INFO",
                 ".dockerignore",
-                "missing (no Dockerfile detected yet)",
-                "Create it with option 11 when containerizing; the template keeps .git, secrets, dependencies, and build output out of the context.",
+                "not present (no Dockerfile detected yet)",
+                "Optional until containerizing; option 11 can create it with .git and secret exclusions.",
             )
         )
 
@@ -3446,10 +3481,11 @@ def safe_file_fix_plan(root: Path) -> List[str]:
         actions.append(".gitignore")
     elif missing_ignore_rules(root):
         actions.append(".gitignore rules")
-    if not (root / ".dockerignore").exists():
-        actions.append(".dockerignore")
-    elif dockerignore_missing(root):
-        actions.append(".dockerignore rules")
+    if dockerfile_present(root):
+        if not (root / ".dockerignore").exists():
+            actions.append(".dockerignore")
+        elif dockerignore_missing(root):
+            actions.append(".dockerignore rules")
     if find_readme(root) is None:
         actions.append("README.md")
     if (root / ".env").exists() and not (root / ".env.example").exists():
@@ -3466,12 +3502,13 @@ def apply_safe_file_fixes(root: Path) -> List[str]:
     elif missing_ignore_rules(root):
         if ensure_gitignore(root, ask_first=False, confirm_changes=False):
             changed.append(".gitignore")
-    if not (root / ".dockerignore").exists():
-        if ensure_dockerignore(root, ask_first=False):
-            changed.append(".dockerignore")
-    elif dockerignore_missing(root):
-        if ensure_dockerignore(root, ask_first=False, confirm_changes=False):
-            changed.append(".dockerignore")
+    if dockerfile_present(root):
+        if not (root / ".dockerignore").exists():
+            if ensure_dockerignore(root, ask_first=False):
+                changed.append(".dockerignore")
+        elif dockerignore_missing(root):
+            if ensure_dockerignore(root, ask_first=False, confirm_changes=False):
+                changed.append(".dockerignore")
     if find_readme(root) is None:
         if ensure_readme(root, ask_first=False, description="A short description of the project."):
             changed.append("README.md")
@@ -6891,15 +6928,16 @@ class App:
             return
         visibility = ask_visibility("private")
         description = ask("Description (optional)", allow_empty=True)
-        command = [which_gh() or "gh", "repo", "create", name, f"--{visibility}", "--add-readme", "--clone"]
+        command = [which_gh() or "gh", "repo", "create", name, f"--{visibility}", "--clone"]
         if description:
             command.extend(["--description", description])
         explain(
-            "Creates a new GitHub repository, adds an initial README commit on GitHub, "
-            "and clones it into the chosen parent folder.",
-            "Starting from a remote README gives you a known-good first commit and an "
-            "origin remote already connected, so the local project starts in a safe state.",
-            "The app refuses to run if the destination folder already exists. Nothing is overwritten.",
+            "Creates an empty GitHub repository, clones it, adds README.md and .gitignore "
+            "locally, signs an initial commit, and pushes it.",
+            "Creating the first commit locally means it is signed with your configured key "
+            "and the repository starts with complete baseline files, not a GitHub web commit.",
+            "The app refuses to run if the destination folder already exists. It never "
+            "force-pushes or rewrites a remote commit.",
         )
         print("Command: " + col(shlex.join(command), "dim"))
         if not confirm("Create the repository and clone it?", True):
@@ -6916,6 +6954,44 @@ class App:
             return
         self.project = target
         success(f"Created and cloned: {target}")
+        ensure_readme(
+            target,
+            ask_first=False,
+            description=description or "A short description of the project.",
+        )
+        ensure_gitignore(target, ask_first=False, confirm_changes=False)
+        if find_readme(target) is None or not (target / ".gitignore").exists():
+            failure("Could not create the baseline README.md and .gitignore.")
+            info("Create them manually, then run the initial commit with option 8.")
+            return
+        if not identity_ready(target):
+            return
+        added = run_cmd(["git", "add", "-A"], cwd=target, timeout=60)
+        if added.combined:
+            print(added.combined)
+        if added.returncode != 0:
+            failure("Could not stage the initial files.")
+            return
+        if not review_staged_safety(target):
+            return
+        branch = git_out(target, "symbolic-ref", "--short", "-q", "HEAD") or "main"
+        print("Command: " + col(shlex.join(["git", "commit", "-m", "Initial commit"]), "dim"))
+        committed = run_streaming(["git", "commit", "-m", "Initial commit"], cwd=target, timeout=180)
+        if committed != 0:
+            failure("Initial commit failed. The remote repository is still empty.")
+            return
+        print("Command: " + col(shlex.join(["git", "push", "-u", "origin", branch]), "dim"))
+        pushed = run_streaming(
+            ["git", "push", "-u", "origin", branch],
+            cwd=target,
+            timeout=300,
+            env_extra=remote_env(),
+        )
+        if pushed != 0:
+            failure("The initial commit exists locally, but the push failed.")
+            info("Check SSH/gh authentication, then run option 8 to push.")
+            return
+        success("Initial commit created and pushed.")
         if confirm("Run a full verification now?", True):
             self.verify_path(target, deep=True)
 

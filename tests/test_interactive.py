@@ -72,8 +72,19 @@ class InteractiveTests(unittest.TestCase):
         fake.write_text(
             "#!/bin/sh\n"
             'printf \'%s\\n\' "$*" >> "$GH_LOG"\n'
+            'if [ "$1" = "auth" ]; then\n'
+            '  printf \'github.com\\n  Logged in to github.com account test\\n\'\n'
+            '  exit 0\n'
+            'fi\n'
+            'if [ "$1" = "repo" ] && [ "$2" = "create" ]; then\n'
+            '  name="$3"\n'
+            '  git init -q --bare -b main "$PWD/$name.git"\n'
+            '  git clone -q "$PWD/$name.git" "$PWD/$name" 2>/dev/null\n'
+            '  exit 0\n'
+            'fi\n'
             'if [ "$1" = "api" ]; then\n'
             '  case "$*" in\n'
+            '    *"/commits/"*) printf \'{"verified":true,"reason":"valid"}\\n\' ;;\n'
             '    *"--method PUT"*) cat > "$GH_PAYLOAD"; printf \'{}\\n\' ;;\n'
             '    *) printf \'{}\\n\' ;;\n'
             "  esac\n"
@@ -154,6 +165,58 @@ class InteractiveTests(unittest.TestCase):
         backups = mod["git_out"](self.repo, "for-each-ref", "--format=%(refname)", "refs/git-create-backups")
         self.assertIn("before-remote-rename-feature", backups)
 
+    def test_scenario_a_creates_local_initial_commit(self) -> None:
+        mod = self.load()
+        self.install_fake_gh()
+        app = mod["App"]()
+        app.project = None
+        parent = Path(self.temp.name)
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Description"):
+                return "demo repository"
+            return default if default is not None else ""
+
+        globals_dict = mod["App"].scenario_a.__globals__
+        globals_dict["ask_path"] = lambda prompt, default=None, **kwargs: parent
+        globals_dict["ask_repo_name"] = lambda prompt, default: "new-project"
+        globals_dict["ask_visibility"] = lambda default: "private"
+        globals_dict["ask"] = ask
+        globals_dict["confirm"] = lambda prompt, default=False: "Run a full verification" not in prompt
+        app.scenario_a()
+        target = parent / "new-project"
+        remote = parent / "new-project.git"
+        self.assertTrue((target / "README.md").is_file())
+        self.assertTrue((target / ".gitignore").is_file())
+        shown = subprocess.run(
+            ["git", "--git-dir", str(remote), "show", "main:README.md"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertIn("# new-project", shown)
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=target,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.assertEqual(status, "")
+
+    def test_github_commit_verification_fallback(self) -> None:
+        mod = self.load()
+        self.install_fake_gh()
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"],
+            cwd=self.repo,
+            check=True,
+        )
+        sha = mod["git_out"](self.repo, "rev-parse", "HEAD")
+        verification = mod["github_commit_verification"](self.repo, "owner", "repo", sha)
+        self.assertIsNotNone(verification)
+        self.assertTrue(verification["verified"])
+
     def test_scan_dispatches_batch_fix(self) -> None:
         mod = self.load()
         app = mod["App"]()
@@ -217,11 +280,14 @@ class InteractiveTests(unittest.TestCase):
         app.project = self.repo
         self.patch_globals(mod["App"].batch_fix_repos, confirm=lambda p, d=False: True)
         app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
-        for name in (".gitignore", ".dockerignore"):
-            self.assertTrue((self.repo / name).is_file(), name)
+        self.assertTrue((self.repo / ".gitignore").is_file())
+        self.assertFalse((self.repo / ".dockerignore").exists())
         for name in (".editorconfig", ".gitattributes"):
             self.assertFalse((self.repo / name).exists(), name)
         self.assertIn("*.pem", (self.repo / ".gitignore").read_text(encoding="utf-8"))
+        (self.repo / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+        app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
+        self.assertTrue((self.repo / ".dockerignore").is_file())
         self.assertIn(".env", (self.repo / ".dockerignore").read_text(encoding="utf-8"))
         (self.repo / ".dockerignore").write_text(".git\n", encoding="utf-8")
         app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])

@@ -356,7 +356,7 @@ The command is printed after the explanation, immediately before execution.
 | `1` | Verify the active project: global settings, repository state, secrets, files, remote, signature, and GitHub metadata. |
 | `2` | Scan one or more comma-separated folders for Git repositories. Choose the depth, then make one active or use batch actions: `s` show status, `a` verify all, `f` fix safe files, `p` fast-forward pull, `u` push all eligible repositories. |
 | `3` | Select the active project by path. |
-| `4` | **Scenario A**: create a new private/public GitHub repository with a README and clone it. |
+| `4` | **Scenario A**: create an empty private/public GitHub repository, clone it, create README.md and .gitignore locally, sign an initial commit, and push it. |
 | `5` | **Scenario B**: clone an existing GitHub repository, or clone any Git URL. |
 | `6` | **Scenario C**: publish a local project: initialize if needed, add safe files, review, sign, commit, create the GitHub repo, and push. If it is already a repository with no remote, it publishes the existing history or connects an existing remote URL. |
 | `7` | **Scenario D**: fetch and diagnose local/remote history. Creates an optional local backup branch. Never force-pushes. |
@@ -499,7 +499,7 @@ outside this app. An existing unrelated hook is never overwritten.
 | --- | --- |
 | `README.md` | Warning when missing. |
 | `.gitignore` | Failure when missing; checks secret and build rules. |
-| `.dockerignore` | Warning when missing; extra context is shown if no Dockerfile is detected yet. |
+| `.dockerignore` | Informational when no Dockerfile is present; warning when a Dockerfile is present. |
 | `LICENSE` | Informational; the file wizard can generate MIT, ISC, or BSD-3 after you choose. |
 | `.env.example` | Required when `.env` exists; can be generated with blank values. |
 | `.editorconfig` | Optional; template available. |
@@ -535,18 +535,26 @@ provide the copyright holder and year. No license is selected automatically.
 
 Use this when you have no code yet and want a safe GitHub starting point.
 
-Menu option **4** runs the equivalent of:
+Menu option **4** creates an empty GitHub repository, clones it, creates
+baseline files locally, signs the initial commit, and pushes it. The equivalent
+flow is:
 
 ```bash
 cd ~/Projects
-gh repo create my-project --private --add-readme --clone
+gh repo create my-project --private --clone
 cd my-project
-git status
-git remote -v
-git branch --show-current
+# git-create creates README.md and .gitignore here
+git add -A
+git commit -m "Initial commit"
+git push -u origin main
 ```
 
-It verifies the clone afterwards.
+The commit is signed with your configured SSH signing key, so the first
+verification can validate the HEAD signature locally. The tool then verifies
+the repository.
+
+If the remote repository was created but the clone or push failed, the message
+explains what remains to do. No force-push is used.
 
 ### Scenario B: clone an existing repository
 
@@ -804,7 +812,7 @@ After a scan, choose a batch action instead of a repository number:
 | --- | --- | --- |
 | `s` | Status | Prints `git status --short --branch` for every scanned repository. |
 | `a` | Verify all | Runs local project checks on every repository and prints a batch summary. |
-| `f` | Fix safe files | Creates missing `.gitignore`, `.dockerignore`, `README.md`, and `.env.example` where applicable, and appends missing ignore rules. Existing content is never overwritten. Optional `.editorconfig` and `.gitattributes` files are left to option 11. |
+| `f` | Fix safe files | Creates missing `.gitignore`, `README.md`, and `.env.example` where applicable, plus `.dockerignore` when a Dockerfile exists, and appends missing ignore rules. Existing content is never overwritten. Optional `.editorconfig` and `.gitattributes` files are left to option 11. |
 | `p` | Pull all | Runs `git pull --ff-only --no-rebase` only for clean repositories with an upstream. Dirty, detached, upstream-less, and in-progress repositories are skipped. |
 | `u` | Push all | Fetches each repository, then pushes the current branch normally when it has an upstream, local commits, and no divergence. Requires typing `PUSH ALL`. |
 
@@ -817,9 +825,9 @@ short status. The status view is read-only and does not fetch or modify
 anything.
 
 Batch fix is deliberately limited to additive file hygiene. It does not create
-optional `.editorconfig` or `.gitattributes` files, choose a license, rewrite
-history, remove tracked secrets, add remotes, commit, or push. Batch pull never
-merges or rebases; batch push never forces.
+optional `.editorconfig`, `.gitattributes`, or no-Dockerfile `.dockerignore`
+files, choose a license, rewrite history, remove tracked secrets, add remotes,
+commit, or push. Batch pull never merges or rebases; batch push never forces.
 
 Both batch pull and batch push skip repositories with:
 
@@ -1219,6 +1227,12 @@ gh ssh-key add ~/.ssh/<your-key>.pub --type signing
 
 `gpg.ssh.allowedSignersFile` can be generated by option 10. It is needed for
 local verification, not for creating the signature.
+
+Commits created through GitHub's web interface are signed with GitHub's key,
+not your local key. If the local signature check cannot use GitHub's signer,
+deep verification asks GitHub whether the commit is verified and reports that
+result instead of treating it as a failure. Scenario A avoids the issue for new
+projects by creating and signing the initial commit locally.
 
 ### Push rejected: non-fast-forward
 

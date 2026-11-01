@@ -4,6 +4,13 @@ All notable changes to `git-create` are recorded here.
 
 ## Unreleased
 
+- Scenario A now creates an empty GitHub repository, builds README.md and
+  .gitignore locally, signs the initial commit, and pushes it instead of
+  starting from a GitHub web-created README commit.
+- HEAD-signature verification now falls back to GitHub's commit verification for
+  GitHub-signed commits that are not in the local allowed_signers file.
+- `.dockerignore` is informational when no Dockerfile exists, and batch fix no
+  longer creates it for non-Docker projects.
 - Added an arrow-key directory picker with up/down navigation, go-up,
   select-current, type-path, hidden-directory, and cancel controls.
 - Added batch actions after a folder scan: status, verify all, apply safe
