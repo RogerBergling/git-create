@@ -169,12 +169,47 @@ class InteractiveTests(unittest.TestCase):
             return default if default is not None else ""
 
         globals_dict = mod["App"].scan_action.__globals__
-        globals_dict["ask_path"] = lambda prompt, default=None: Path(self.temp.name)
+        globals_dict["ask_scan_paths"] = lambda prompt, default=None: [Path(self.temp.name)]
         globals_dict["ask"] = ask
         globals_dict["print_scan_results"] = lambda *args, **kwargs: None
         app.scan_action()
         self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0])
+
+    def test_scan_multiple_roots_collects_all_repositories(self) -> None:
+        mod = self.load()
+        roots = []
+        for name in ("alpha", "beta"):
+            repo = Path(self.temp.name) / "roots" / name
+            repo.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
+            (repo / "README.md").write_text(f"# {name}\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.com", "commit", "-qm", "init"],
+                cwd=repo,
+                check=True,
+            )
+            roots.append(repo)
+        app = mod["App"]()
+        app.project = self.repo
+        calls = []
+        app.batch_status_repos = lambda repos: calls.append(list(repos))
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Maximum depth"):
+                return "3"
+            if prompt.startswith("Number to activate"):
+                return "s"
+            return default if default is not None else ""
+
+        globals_dict = mod["App"].scan_action.__globals__
+        globals_dict["ask_scan_paths"] = lambda prompt, default=None: roots
+        globals_dict["ask"] = ask
+        globals_dict["print_scan_results"] = lambda *args, **kwargs: None
+        app.scan_action()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(calls[0]), 2)
 
     def test_batch_safe_file_fixes(self) -> None:
         mod = self.load()
@@ -182,8 +217,10 @@ class InteractiveTests(unittest.TestCase):
         app.project = self.repo
         self.patch_globals(mod["App"].batch_fix_repos, confirm=lambda p, d=False: True)
         app.batch_fix_repos([{"path": str(self.repo), "name": self.repo.name}])
-        for name in (".gitignore", ".dockerignore", ".editorconfig", ".gitattributes"):
+        for name in (".gitignore", ".dockerignore"):
             self.assertTrue((self.repo / name).is_file(), name)
+        for name in (".editorconfig", ".gitattributes"):
+            self.assertFalse((self.repo / name).exists(), name)
         self.assertIn("*.pem", (self.repo / ".gitignore").read_text(encoding="utf-8"))
         self.assertIn(".env", (self.repo / ".dockerignore").read_text(encoding="utf-8"))
         (self.repo / ".dockerignore").write_text(".git\n", encoding="utf-8")
@@ -218,6 +255,16 @@ class InteractiveTests(unittest.TestCase):
             text=True,
         )
         self.assertNotEqual(result.returncode, 0)
+
+    def test_batch_status_reports_untracked_files(self) -> None:
+        mod = self.load()
+        (self.repo / "visible-status.txt").write_text("untracked\n", encoding="utf-8")
+        app = mod["App"]()
+        app.project = self.repo
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            app.batch_status_repos([{"path": str(self.repo), "name": self.repo.name}])
+        self.assertIn("visible-status.txt", output.getvalue())
 
     def test_batch_pull_fast_forward(self) -> None:
         mod = self.load()

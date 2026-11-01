@@ -199,8 +199,9 @@ Typical menu flow:
    to generate a Dockerfile and GHCR publishing workflow.
 8. Use **17** for stashes, **18** for guided merge/rebase, **19** for tags and
    GitHub releases, and **20** to inspect status, diffs, and history.
-9. In option **2**, enter `a` to verify every repository, `f` to fix safe file
-   issues, `p` to fast-forward pull, or `u` to push all eligible repositories.
+9. In option **2**, enter `s` to show status, `a` to verify every repository,
+   `f` to fix safe file issues, `p` to fast-forward pull, or `u` to push all
+   eligible repositories.
 10. Use **21** for pull requests, issues, and reviews, **22** to manage local
     remote names and URLs, **23** for worktrees and submodules, and **24** to
     toggle dry-run mode.
@@ -328,7 +329,7 @@ The command is printed after the explanation, immediately before execution.
 | Option | Function |
 | --- | --- |
 | `1` | Verify the active project: global settings, repository state, secrets, files, remote, signature, and GitHub metadata. |
-| `2` | Scan a folder for Git repositories. Choose the folder and depth, then make one active, verify one, or use batch actions: `a` verify all, `f` fix safe files, `p` fast-forward pull, `u` push all eligible repositories. |
+| `2` | Scan one or more comma-separated folders for Git repositories. Choose the depth, then make one active or use batch actions: `s` show status, `a` verify all, `f` fix safe files, `p` fast-forward pull, `u` push all eligible repositories. |
 | `3` | Select the active project by path. |
 | `4` | **Scenario A**: create a new private/public GitHub repository with a README and clone it. |
 | `5` | **Scenario B**: clone an existing GitHub repository, or clone any Git URL. |
@@ -658,7 +659,8 @@ Menu option **14** provides:
 Branch names are validated with `git check-ref-format`. Branch switching is
 refused while a merge/rebase/cherry-pick/revert is in progress. Git itself
 refuses a switch that would overwrite conflicting local changes; the app never
-discards them automatically.
+discards them automatically. Push requires the upstream branch name to match
+the current local branch; use option 14 to set a matching upstream.
 
 Renaming a local branch is **local only**. To rename an `origin` branch, use
 the separate remote-branch rename action; it pushes the new name, then deletes
@@ -770,12 +772,13 @@ Menu option **20** is read-only. It shows:
 
 ## Batch operations
 
-After a folder scan, choose a batch action instead of a repository number:
+After a scan, choose a batch action instead of a repository number:
 
 | Key | Action | What it does |
 | --- | --- | --- |
+| `s` | Status | Prints `git status --short --branch` for every scanned repository. |
 | `a` | Verify all | Runs local project checks on every repository and prints a batch summary. |
-| `f` | Fix safe files | Creates missing `.gitignore`, `.dockerignore`, `README.md`, `.editorconfig`, `.gitattributes`, and `.env.example` where applicable, and appends missing ignore rules. Existing content is never overwritten. |
+| `f` | Fix safe files | Creates missing `.gitignore`, `.dockerignore`, `README.md`, and `.env.example` where applicable, and appends missing ignore rules. Existing content is never overwritten. Optional `.editorconfig` and `.gitattributes` files are left to option 11. |
 | `p` | Pull all | Runs `git pull --ff-only --no-rebase` only for clean repositories with an upstream. Dirty, detached, upstream-less, and in-progress repositories are skipped. |
 | `u` | Push all | Fetches each repository, then pushes the current branch normally when it has an upstream, local commits, and no divergence. Requires typing `PUSH ALL`. |
 
@@ -783,9 +786,14 @@ Batch verification includes tracked and untracked secret scanning, but it is
 local-only: it does not fetch, contact GitHub, or run `git fsck`. Run option 1
 on an individual repository for deep verification.
 
-Batch fix is deliberately limited to additive file hygiene. It does not choose
-a license, rewrite history, remove tracked secrets, add remotes, commit, or
-push. Batch pull never merges or rebases; batch push never forces.
+`p` and `u` stream the normal Git output live, then print each repository's
+short status. The status view is read-only and does not fetch or modify
+anything.
+
+Batch fix is deliberately limited to additive file hygiene. It does not create
+optional `.editorconfig` or `.gitattributes` files, choose a license, rewrite
+history, remove tracked secrets, add remotes, commit, or push. Batch pull never
+merges or rebases; batch push never forces.
 
 Both batch pull and batch push skip repositories with:
 

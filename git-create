@@ -884,6 +884,31 @@ def run_interactive(args: Sequence[object], cwd: Optional[Path] = None) -> int:
         return 126
 
 
+def run_streaming(
+    args: Sequence[object],
+    cwd: Optional[Path] = None,
+    timeout: int = 300,
+    env_extra: Optional[Dict[str, str]] = None,
+) -> int:
+    """Run a command with terminal output inherited so progress is visible live."""
+    cmd = [str(arg) for arg in args]
+    env = os.environ.copy()
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    if env_extra:
+        env.update(env_extra)
+    try:
+        return subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=env, timeout=timeout).returncode
+    except subprocess.TimeoutExpired:
+        failure("Command timed out: " + shlex.join(cmd))
+        return 124
+    except FileNotFoundError:
+        failure(f"Command not found: {cmd[0]}")
+        return 127
+    except OSError as exc:
+        failure(str(exc))
+        return 126
+
+
 def git(path: Path, *args: object, timeout: int = 30, env_extra: Optional[Dict[str, str]] = None) -> CmdResult:
     return run_cmd(["git", "-C", str(path), *args], timeout=timeout, env_extra=env_extra)
 
@@ -2814,6 +2839,21 @@ def ask_path(prompt: str, default: Optional[Path] = None) -> Path:
     return path.resolve()
 
 
+def ask_scan_paths(prompt: str, default: Optional[Path] = None) -> List[Path]:
+    default_text = str(default) if default else None
+    raw = ask(prompt, default=default_text)
+    paths: List[Path] = []
+    for part in re.split(r"[,;]", raw):
+        part = part.strip()
+        if not part:
+            continue
+        path = Path(os.path.expanduser(os.path.expandvars(part)))
+        if not path.is_absolute():
+            path = Path.cwd() / path
+        paths.append(path.resolve())
+    return paths
+
+
 def confirm(prompt: str, default: bool = False) -> bool:
     suffix = "[Y/n]" if default else "[y/N]"
     try:
@@ -3199,10 +3239,6 @@ def safe_file_fix_plan(root: Path) -> List[str]:
         actions.append(".dockerignore rules")
     if find_readme(root) is None:
         actions.append("README.md")
-    if not (root / ".editorconfig").exists():
-        actions.append(".editorconfig")
-    if not (root / ".gitattributes").exists():
-        actions.append(".gitattributes")
     if (root / ".env").exists() and not (root / ".env.example").exists():
         actions.append(".env.example")
     return actions
@@ -3226,12 +3262,6 @@ def apply_safe_file_fixes(root: Path) -> List[str]:
     if find_readme(root) is None:
         if ensure_readme(root, ask_first=False, description="A short description of the project."):
             changed.append("README.md")
-    if not (root / ".editorconfig").exists():
-        if ensure_editorconfig(root, ask_first=False):
-            changed.append(".editorconfig")
-    if not (root / ".gitattributes").exists():
-        if ensure_gitattributes(root, ask_first=False):
-            changed.append(".gitattributes")
     if (root / ".env").exists() and not (root / ".env.example").exists():
         if ensure_env_example(root, ask_first=False, confirm_changes=False):
             changed.append(".env.example")
@@ -3599,11 +3629,12 @@ class App:
                    without executing them.
 
                 Scan (option 2)
-                   After scanning, 'a' verifies all repositories, 'f' applies safe
-                   missing-file fixes, 'p' fast-forward pulls clean repositories,
-                   and 'u' pushes repositories that are ahead and not diverged.
-                   Batch pull/push skip dirty, detached, upstream-less, or
-                   in-progress repositories and never force.
+                   Accepts one folder or comma-separated folders. After scanning,
+                   's' shows short status for all repositories, 'a' verifies all,
+                   'f' applies safe missing-file fixes, 'p' fast-forward pulls
+                   clean repositories, and 'u' pushes repositories that are ahead
+                   and not diverged. Batch pull/push skip dirty, detached,
+                   upstream-less, or in-progress repositories and never force.
                 """
             )
         )
@@ -3702,9 +3733,13 @@ class App:
             default = DEFAULT_PROJECTS
         else:
             default = Path.cwd()
-        path = ask_path("Folder to scan", default=default)
-        if not path.exists() or not path.is_dir():
-            failure(f"Not a directory: {path}")
+        paths = ask_scan_paths("Folder(s) to scan (comma-separated)", default=default)
+        if not paths:
+            failure("No folder was provided.")
+            return
+        invalid = [path for path in paths if not path.exists() or not path.is_dir()]
+        if invalid:
+            failure("Not a directory: " + ", ".join(str(path) for path in invalid))
             return
         depth_text = ask("Maximum depth", default=str(DEFAULT_DEPTH))
         try:
@@ -3712,24 +3747,37 @@ class App:
         except ValueError:
             depth = DEFAULT_DEPTH
         explain(
-            "Walks the selected folder down to the requested depth and looks for .git "
-            "repositories, then reads their branch, status, upstream, and last commit.",
+            "Walks the selected folder or comma-separated folders down to the requested "
+            "depth and looks for .git repositories, then reads their branch, status, "
+            "upstream, and last commit.",
             "A quick overview helps you find projects, notice dirty worktrees, and choose "
             "the right repository before running dangerous or remote-changing actions.",
             "Scanning is read-only. It does not fetch, commit, modify, or push anything.",
         )
-        repos = scan_repositories(path, depth)
-        print_scan_results(path, repos, depth)
+        repos: List[Dict[str, object]] = []
+        seen_paths = set()
+        for root in paths:
+            print(col(f"Scanning {root}...", "dim"), flush=True)
+            for repo in scan_repositories(root, depth):
+                repo_path = str(repo["path"])
+                if repo_path not in seen_paths:
+                    seen_paths.add(repo_path)
+                    repos.append(repo)
+        repos.sort(key=lambda item: str(item["path"]).lower())
+        print_scan_results(paths[0], repos, depth, extra_roots=paths[1:])
         if not repos:
             return
         choice = ask(
-            "Number to activate, 'a' verify all, 'f' fix safe files, 'p' pull all, "
-            "'u' push all, or Enter to return",
+            "Number to activate, 's' status, 'a' verify all, 'f' fix safe files, "
+            "'p' pull all, 'u' push all, or Enter to return",
             allow_empty=True,
         )
         if not choice:
             return
         action = choice.strip().lower()
+        if action in ("s", "status"):
+            self.batch_status_repos(repos)
+            return
         if action in ("a", "all"):
             self.batch_verify_repos(repos)
             return
@@ -3882,6 +3930,19 @@ class App:
         else:
             warning("No files were changed.")
 
+    def batch_status_repos(self, repos: Sequence[Dict[str, object]]) -> None:
+        if not repos:
+            info("No repositories to inspect.")
+            return
+        heading(f"Status across {len(repos)} repositories")
+        for repo in repos:
+            root = Path(str(repo["path"]))
+            name = str(repo.get("name") or root.name)
+            print()
+            print(col(name, "bold") + f"  ({root})")
+            output = git_out(root, "status", "--short", "--branch")
+            print(output or "(status unavailable)")
+
     def batch_pull_repos(self, repos: Sequence[Dict[str, object]]) -> None:
         if not repos:
             info("No repositories to pull.")
@@ -3941,15 +4002,11 @@ class App:
             name = str(repo.get("name") or root.name)
             print()
             print(col(f"{name}: pulling {branch} <- {upstream}", "bold"))
-            result = run_cmd(
-                ["git", "pull", "--ff-only", "--no-rebase"],
-                cwd=root,
-                timeout=120,
-                env_extra=remote_env(),
-            )
-            if result.combined:
-                print(result.combined)
-            if result.returncode == 0:
+            command = ["git", "pull", "--ff-only", "--no-rebase"]
+            print("Command: " + col(shlex.join(command), "dim"))
+            code = run_streaming(command, cwd=root, timeout=120, env_extra=remote_env())
+            print(git_out(root, "status", "--short", "--branch"))
+            if code == 0:
                 succeeded += 1
                 success(f"{name}: fast-forward pull complete.")
             else:
@@ -3999,13 +4056,14 @@ class App:
                 skipped.append((name, f"upstream branch name differs ({upstream})"))
                 continue
             if not self.dry_run:
-                fetch = run_cmd(
+                print(col(f"{name}: fetching {remote_name}...", "dim"), flush=True)
+                fetch_code = run_streaming(
                     ["git", "fetch", "--prune", remote_name],
                     cwd=root,
                     timeout=120,
                     env_extra=remote_env(),
                 )
-                if fetch.returncode != 0:
+                if fetch_code != 0:
                     skipped.append((name, "fetch failed"))
                     continue
             state = quick_repo_info(root)
@@ -4054,10 +4112,10 @@ class App:
             print(col(f"{name}: pushing {branch} -> {upstream} ({ahead} ahead{dirty_note})", "bold"))
             remote_name, remote_branch = upstream.split("/", 1)
             command = ["git", "push", remote_name, f"{branch}:{remote_branch}"]
-            result = run_cmd(command, cwd=root, timeout=300, env_extra=remote_env())
-            if result.combined:
-                print(result.combined)
-            if result.returncode == 0:
+            print("Command: " + col(shlex.join(command), "dim"))
+            code = run_streaming(command, cwd=root, timeout=300, env_extra=remote_env())
+            print(git_out(root, "status", "--short", "--branch"))
+            if code == 0:
                 succeeded += 1
                 success(f"{name}: push complete.")
             else:
@@ -7042,10 +7100,11 @@ class App:
                 "The working tree must be clean. The backup branch remains available.",
             )
             if confirm("Run 'git pull --ff-only' now?", False):
-                result = git(path, "pull", "--ff-only", "origin", branch, timeout=180, env_extra=remote_env())
-                if result.combined:
-                    print(result.combined)
-                if result.returncode == 0:
+                command = ["git", "pull", "--ff-only", "origin", branch]
+                print("Command: " + col(shlex.join(command), "dim"))
+                code = run_streaming(command, cwd=path, timeout=180, env_extra=remote_env())
+                print(git_out(path, "status", "--short", "--branch"))
+                if code == 0:
                     success("Fast-forward pull completed. Backup branch kept locally.")
                 else:
                     failure("Fast-forward pull failed. Nothing was forced.")
@@ -7196,22 +7255,28 @@ class App:
                         info("Use option 7 (scenario D) to diagnose, or pull --ff-only after committing/stashing local work.")
                         if not confirm("Attempt a normal (non-force) push anyway?", False):
                             return False
-        command = ["git", "push"]
-        if not upstream:
+        if upstream:
+            remote_name, _, remote_branch = upstream.partition("/")
+            if not remote_name or not remote_branch:
+                failure(f"Malformed upstream: {upstream}")
+                return False
+            if remote_branch != branch:
+                failure(f"Upstream branch '{upstream}' does not match local branch '{branch}'.")
+                info("Set a matching upstream with option 14 before pushing.")
+                return False
+            command = ["git", "push", remote_name, f"{branch}:{remote_branch}"]
+        else:
             command = ["git", "push", "-u", "origin", branch]
         print()
         print("Command: " + col(shlex.join(command), "dim"))
-        result = run_cmd(command, cwd=path, timeout=300, env_extra=remote_env())
-        if result.combined:
-            print(result.combined)
-        if result.returncode == 0:
+        code = run_streaming(command, cwd=path, timeout=300, env_extra=remote_env())
+        print(git_out(path, "status", "--short", "--branch"))
+        if code == 0:
             success(f"Pushed branch '{branch}'.")
             return True
         failure("Push failed. No force was used and no history was rewritten.")
-        if re.search(r"non-fast-forward|fetch first|\[rejected\]|failed to push", result.combined, re.IGNORECASE):
-            info("The remote has commits you do not have locally. Use option 7 (scenario D) to compare histories.")
-        else:
-            info("Check SSH agent/key and gh authentication. Example: eval \"$(ssh-agent -s)\" && ssh-add ~/.ssh/<key>")
+        info("If the remote rejected it as non-fast-forward, use option 7 (scenario D) to compare histories.")
+        info("Otherwise check the SSH agent/key and gh authentication.")
         return False
 
     # -- rename -------------------------------------------------------------
@@ -8365,8 +8430,17 @@ def quick_repo_info(path: Path) -> Optional[Dict[str, object]]:
     }
 
 
-def print_scan_results(root: Path, repos: Sequence[Dict[str, object]], depth: int) -> None:
-    heading(f"Repositories under {root}")
+def print_scan_results(
+    root: Path,
+    repos: Sequence[Dict[str, object]],
+    depth: int,
+    extra_roots: Sequence[Path] = (),
+) -> None:
+    roots = [root, *extra_roots]
+    if len(roots) == 1:
+        heading(f"Repositories under {root}")
+    else:
+        heading("Repositories under: " + ", ".join(str(item) for item in roots))
     if not repos:
         info("No Git repositories found. Increase depth or choose another folder.")
         return

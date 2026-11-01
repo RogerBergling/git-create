@@ -240,7 +240,7 @@ timeouts, and concurrency cancellation. Remaining work:
 
 ## Implemented in this review pass
 
-- batch scan actions for safe file fixes, fast-forward pull, and normal push;
+- batch scan actions for status, safe file fixes, fast-forward pull, and normal push;
 - collision-resistant, private recovery backup files;
 - exclusive file creation that refuses symlinks and overwrites;
 - stricter branch-protection review-count validation;

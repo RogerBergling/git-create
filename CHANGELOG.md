@@ -4,8 +4,14 @@ All notable changes to `git-create` are recorded here.
 
 ## Unreleased
 
-- Added batch actions after a folder scan: verify all, apply safe project-file
-  fixes, fast-forward pull, and normal push across eligible repositories.
+- Added batch actions after a folder scan: status, verify all, apply safe
+  project-file fixes, fast-forward pull, and normal push across eligible
+  repositories.
+- Added comma-separated folder scanning and live Git output during pull/push,
+  followed by each repository's short status. Push now uses an explicit refspec
+  and requires a matching upstream branch name.
+- Batch fix now skips optional `.editorconfig` and `.gitattributes` files to
+  avoid creating untracked noise; use option 11 when those files are wanted.
 - Extended dry-run mode to batch file fixes, batch pull, and batch push.
 - Hardened recovery backups with collision-resistant names and exclusive,
   private file creation that refuses symlinks and overwrites.
