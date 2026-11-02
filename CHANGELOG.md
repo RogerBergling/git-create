@@ -2,6 +2,12 @@
 
 All notable changes to `git-create` are recorded here.
 
+## 1.10.0
+
+- Added menu option 25 for deleting the local working copy and/or the GitHub
+  repository, with a full tar.gz backup for local deletion and typed
+  confirmations for both targets.
+
 ## 1.9.0
 
 - Added version, build number, build date, and build time to the main menu,

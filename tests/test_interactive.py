@@ -116,6 +116,69 @@ class InteractiveTests(unittest.TestCase):
         for value in (mod["VERSION"], mod["BUILD_NUMBER"], mod["BUILD_DATE"], mod["BUILD_TIME"]):
             self.assertIn(value, rendered)
 
+    def test_delete_repository_is_blocked_in_dry_run(self) -> None:
+        mod = self.load()
+        app = mod["App"](dry_run=True)
+        app.project = self.repo
+        self.patch_globals(
+            mod["App"].delete_repository_action,
+            ask=lambda prompt, default=None, allow_empty=False: "1",
+        )
+        app.delete_repository_action()
+        self.assertTrue(self.repo.exists())
+        self.assertEqual(list(Path(self.temp.name).glob("repo-deleted-*.tar.gz")), [])
+
+    def test_delete_local_repository_with_backup(self) -> None:
+        mod = self.load()
+        app = mod["App"]()
+        app.project = self.repo
+        resolved = self.repo.resolve()
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Choose an option"):
+                return "1"
+            if prompt.startswith('Type "DELETE LOCAL'):
+                return f"DELETE LOCAL {resolved}"
+            return default if default is not None else ""
+
+        self.patch_globals(
+            mod["App"].delete_repository_action,
+            ask=ask,
+            confirm=lambda prompt, default=False: True,
+        )
+        app.delete_repository_action()
+        self.assertFalse(resolved.exists())
+        archives = list(Path(self.temp.name).glob("repo-deleted-*.tar.gz"))
+        self.assertEqual(len(archives), 1)
+        self.assertGreater(archives[0].stat().st_size, 0)
+
+    def test_delete_github_repository(self) -> None:
+        mod = self.load()
+        log, _, _ = self.install_fake_gh()
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"],
+            cwd=self.repo,
+            check=True,
+        )
+        app = mod["App"]()
+        app.project = self.repo
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Choose an option"):
+                return "2"
+            if prompt.startswith('Type "DELETE GITHUB'):
+                return "DELETE GITHUB owner/repo"
+            return default if default is not None else ""
+
+        self.patch_globals(
+            mod["App"].delete_repository_action,
+            ask=ask,
+            confirm=lambda prompt, default=False: True,
+        )
+        app.delete_repository_action()
+        self.assertIn("repo delete owner/repo --yes", log.read_text(encoding="utf-8"))
+        self.assertTrue(self.repo.exists())
+
     def test_remote_add_and_remove(self) -> None:
         mod = self.load()
         remote = Path(self.temp.name) / "remote.git"

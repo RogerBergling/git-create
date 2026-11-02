@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.9.0**. Build **20261101.1114**, built **2026-11-01 11:14**.
+Current version: **1.10.0**. Build **20261102.2054**, built **2026-11-02 20:54**.
 
 The main menu shows the version, build number, and build timestamp on every
 render. `git-create --version` prints the same build metadata.
@@ -380,6 +380,7 @@ The command is printed after the explanation, immediately before execution.
 | `22` | Remotes: list, add, edit URL, rename, remove, and fetch with prune. |
 | `23` | Worktrees and submodules: list/add/remove/prune worktrees; list/update/sync/add/deinitialize/remove submodules. |
 | `24` | Toggle dry-run mode for worktree, submodule, remote, and backup-cleanup changes. |
+| `25` | Delete the local working copy and/or the GitHub repository with typed confirmations and an optional local backup archive. |
 | `0` | Exit. |
 
 The defaults point at `~/Projects` when it exists. Directory prompts use the
@@ -635,6 +636,28 @@ Menu option **9** can:
 Git does not track a directory name, so a local rename does not require a
 commit. GitHub redirects the old repository name after a rename, but external
 links and other local clones should still be updated. No history is rewritten.
+
+### Delete a repository
+
+Menu option **25** deletes a local working copy, the GitHub repository behind
+`origin`, or both.
+
+- **Local deletion** removes the entire folder, including `.git`. It offers a
+  full `.tar.gz` backup next to the repository first, with `0600` permissions.
+  The archive includes tracked history, untracked files, and the working tree.
+  You must type the exact local path to confirm.
+- **GitHub deletion** runs `gh repo delete OWNER/REPO --yes`. It requires admin
+  access and the `delete_repo` scope. You must type `DELETE GITHUB OWNER/REPO`.
+- **Both** requires both typed phrases and a final confirmation. The GitHub
+  repository is deleted first; if that fails, the local folder is kept.
+- Deleting a filesystem root, your home directory, a mount point, or a linked
+  worktree is refused. Use option **23** to remove a linked worktree safely.
+- Repository deletion is disabled while dry-run mode is on. Turn dry-run off
+  explicitly before running option 25.
+
+Local deletion changes the process working directory to the parent folder if
+the app was started inside the repository. The shell may still show the old
+path; run `cd` to the parent directory.
 
 ### Commit and push
 
@@ -929,8 +952,10 @@ In dry-run mode the app shows the exact command and skips execution for:
 - batch fast-forward pull
 - batch normal push
 
-Read-only lists and checks still run normally. Dry-run mode does not affect
-single-repository branch, tag, stash, commit, push, or GitHub write actions.
+Read-only lists and checks still run normally. Repository deletion is blocked
+entirely in dry-run mode; turn it off before using option 25. Dry-run mode does
+not affect single-repository branch, tag, stash, commit, push, or GitHub write
+actions.
 
 ## Docker image and GHCR workflow
 
@@ -1068,8 +1093,9 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
   `.git/git-create-backups/` directory; branch rename/delete, merge/rebase, tag
   deletion, and soft undo create safety refs under `refs/git-create-backups/`.
 - **Typed confirmations for destructive actions.** Discarding files, remote
-  branch/tag deletion, stash drop, and soft-undoing a commit require a typed
-  phrase.
+  branch/tag deletion, stash drop, soft-undoing a commit, and repository
+  deletion require a typed phrase. Local repository deletion offers a full
+  backup archive first.
 - **Docker/GHCR generation changes files only.** It does not build an image or
   push a package; the generated GitHub Actions workflow performs publishing.
 - **GitHub admin writes are explicit.** Branch-protection changes are shown
@@ -1111,6 +1137,9 @@ dedicated tool.
   messages and binary blobs are not content-scanned.
 - Publish, push, and scenario D flows expect a remote named `origin`. Other
   remote names are inspected and reported, but are not used automatically.
+- Remote repository deletion supports GitHub `origin` repositories only. Local
+  deletion works for any Git repository. A full local backup archive can be
+  large for repositories with big working trees or ignored assets.
 
 ### Git push and file size
 

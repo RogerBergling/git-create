@@ -242,6 +242,7 @@ timeouts, and concurrency cancellation. Remaining work:
 
 - batch scan actions for status, safe file fixes, fast-forward pull, and normal push;
 - locally signed baseline commits for new projects and GitHub signature fallback;
+- guarded local/GitHub repository deletion with backups and typed confirmations;
 - collision-resistant, private recovery backup files;
 - exclusive file creation that refuses symlinks and overwrites;
 - stricter branch-protection review-count validation;

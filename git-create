@@ -24,6 +24,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import textwrap
 import time
 from dataclasses import dataclass, field
@@ -32,10 +33,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 APP = "git-create"
-VERSION = "1.9.0"
-BUILD_NUMBER = "20261101.1114"
-BUILD_DATE = "2026-11-01"
-BUILD_TIME = "11:14"
+VERSION = "1.10.0"
+BUILD_NUMBER = "20261102.2054"
+BUILD_DATE = "2026-11-02"
+BUILD_TIME = "20:54"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -3605,6 +3606,7 @@ class App:
                     "22": self.remotes_action,
                     "23": self.worktrees_action,
                     "24": self.toggle_dry_run,
+                    "25": self.delete_repository_action,
                 }
                 action = actions.get(choice)
                 if action is None:
@@ -3681,6 +3683,7 @@ class App:
             ("22", "Remotes: list/add/edit/rename/remove/prune"),
             ("23", "Worktrees/submodules: list/add/remove/update/sync"),
             ("24", "Toggle dry-run mode for worktree/submodule/remote/backup changes"),
+            ("25", "Delete repository: local folder and/or GitHub repository"),
             ("0", "Exit"),
         ]
         for number, label in items:
@@ -3904,6 +3907,12 @@ class App:
                 Dry-run mode (option 24 or --dry-run)
                    Shows worktree, submodule, remote, and backup-cleanup commands
                    without executing them.
+
+                Delete repository (option 25)
+                   Deletes the local working copy and/or the GitHub repository.
+                   Local deletion offers a full tar.gz backup and requires the
+                   typed path. GitHub deletion requires the delete_repo scope and
+                   a typed owner/repo phrase.
 
                 Scan (option 2)
                    Accepts one folder or comma-separated folders. After scanning,
@@ -7732,6 +7741,134 @@ class App:
         if entries and confirm("Working tree has changes. Commit and push them now?", False):
             self.commit_and_push_action()
 
+    # -- repository deletion ------------------------------------------------
+
+    def delete_repository_action(self) -> None:
+        path = self.require_project()
+        if path is None:
+            return
+        resolved = path.resolve()
+        parsed = parse_github_url(remote_urls(path).get("origin", ""))
+        explain(
+            "Deletes the local working copy and/or the GitHub repository behind origin.",
+            "This is for temporary, demo, or obsolete repositories. Local deletion removes "
+            "the entire folder including .git; GitHub deletion removes the repository for "
+            "every collaborator and cannot be undone from this app.",
+            "Typed confirmations are required. Local deletion offers a full tar.gz backup "
+            "outside the repository. GitHub deletion requires admin access and the "
+            "delete_repo gh scope. No deletion is attempted without explicit confirmation.",
+        )
+        heading("Delete repository")
+        print("Local path: " + col(str(resolved), "cyan"))
+        if parsed:
+            print("GitHub repo: " + col(f"{parsed[0]}/{parsed[1]}", "cyan"))
+        else:
+            info("No GitHub origin remote found; GitHub deletion is unavailable.")
+        print()
+        print("  1) Delete local working copy only")
+        print("  2) Delete GitHub repository only")
+        print("  3) Delete local working copy and GitHub repository")
+        print("  0) Back")
+        choice = ask("Choose an option", default="0", allow_empty=True)
+        if choice in ("0", ""):
+            return
+        local = choice in ("1", "3")
+        remote = choice in ("2", "3")
+        if not local and not remote:
+            warning("Unknown option.")
+            return
+        if self.dry_run:
+            warning("Dry-run mode is ON; repository deletion is disabled.")
+            info("Turn off dry-run mode before deleting a local or GitHub repository.")
+            return
+        if remote and not parsed:
+            failure("No GitHub origin remote found.")
+            return
+        if remote:
+            if not ensure_gh(require_auth=True, offer_login=True):
+                return
+        if local:
+            if resolved == Path("/") or resolved == HOME.resolve():
+                failure("Refusing to delete the filesystem root or your home directory.")
+                return
+            if os.path.ismount(str(resolved)):
+                failure("Refusing to delete a filesystem mount point.")
+                return
+            if is_linked_worktree(resolved):
+                failure("Refusing to delete a linked worktree with the filesystem.")
+                info("Use option 23 to remove a linked worktree safely.")
+                return
+            entries = status_entries(resolved)
+            if entries:
+                warning(f"The working tree has {len(entries)} uncommitted change(s).")
+                info("The backup archive will include the working tree and .git history.")
+            make_backup = confirm("Create a full backup archive before deleting the local repository?", True)
+            if make_backup:
+                print(col("Creating backup archive...", "dim"), flush=True)
+                archive = create_repo_archive(resolved)
+                if archive is None:
+                    if not confirm("Backup failed. Delete the local repository without a backup?", False):
+                        return
+                else:
+                    success(f"Backup archive: {archive}")
+                    try:
+                        size = archive.stat().st_size
+                    except OSError:
+                        size = 0
+                    if size:
+                        info("Backup size: " + format_size(size))
+            elif not confirm("Delete the local repository without a backup?", False):
+                return
+            local_phrase = f"DELETE LOCAL {resolved}"
+            typed = ask(f'Type "{local_phrase}" to delete the local folder', allow_empty=True)
+            if typed != local_phrase:
+                info("Local deletion cancelled.")
+                return
+        if remote and parsed:
+            owner, repo = parsed
+            remote_phrase = f"DELETE GITHUB {owner}/{repo}"
+            typed = ask(f'Type "{remote_phrase}" to delete the GitHub repository', allow_empty=True)
+            if typed != remote_phrase:
+                info("GitHub deletion cancelled.")
+                return
+        if local and remote:
+            if not confirm("Permanently delete BOTH the local folder and GitHub repository?", False):
+                return
+        if remote and parsed:
+            owner, repo = parsed
+            command = [which_gh() or "gh", "repo", "delete", f"{owner}/{repo}", "--yes"]
+            print("Command: " + col(shlex.join(command), "dim"))
+            if not confirm(f"Run gh repo delete for {owner}/{repo}?", False):
+                return
+            result = run_cmd(command, cwd=path, timeout=120)
+            if result.combined:
+                print(result.combined)
+            if result.returncode != 0:
+                failure("GitHub repository deletion failed. The local folder was not deleted.")
+                info("Admin permission and the delete_repo scope are required.")
+                info("Try: gh auth refresh -h github.com -s delete_repo")
+                return
+            success(f"Deleted GitHub repository {owner}/{repo}.")
+        if local:
+            try:
+                Path.cwd().resolve().relative_to(resolved)
+            except ValueError:
+                pass
+            else:
+                try:
+                    os.chdir(str(resolved.parent))
+                except OSError as exc:
+                    failure(f"Could not leave the directory before deletion: {exc}")
+                    return
+            try:
+                shutil.rmtree(resolved)
+            except OSError as exc:
+                failure(f"Could not delete the local repository: {exc}")
+                return
+            self.project = None
+            success(f"Deleted local repository: {resolved}")
+            info("If this shell was inside that folder, run: cd " + shlex.quote(str(resolved.parent)))
+
     # -- global settings ----------------------------------------------------
 
     def settings_action(self) -> None:
@@ -8558,6 +8695,32 @@ def create_stash_backup(root: Path, stash_ref: str, label: str = "stash") -> Opt
     if not write_exclusive_text(patch, result.out, 0o600):
         return None
     return patch
+
+
+def create_repo_archive(root: Path) -> Optional[Path]:
+    """Archive an entire repository, including .git and untracked files."""
+    archive = root.parent / f"{root.name}-deleted-{unique_suffix()}.tar.gz"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(archive), flags, 0o600)
+    except OSError as exc:
+        failure(f"Could not create backup archive: {exc}")
+        return None
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            with tarfile.open(fileobj=handle, mode="w:gz") as bundle:
+                bundle.add(str(root), arcname=root.name)
+        os.chmod(archive, 0o600)
+    except (OSError, tarfile.TarError) as exc:
+        try:
+            archive.unlink()
+        except OSError:
+            pass
+        failure(f"Could not create backup archive: {exc}")
+        return None
+    return archive
 
 
 def unstage_paths(root: Path, paths: Sequence[str]) -> bool:
