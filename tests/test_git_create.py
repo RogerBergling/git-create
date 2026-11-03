@@ -204,6 +204,9 @@ class GitCreateTests(unittest.TestCase):
             mod["redact_remote_url"]("git@github.com:owner/repo.git"),
             "git@github.com:owner/repo.git",
         )
+        query_redacted = mod["redact_remote_url"]("https://github.com/owner/repo?token=abc123&x=1")
+        self.assertNotIn("abc123", query_redacted)
+        self.assertIn("x=1", query_redacted)
         self.assertNotIn("secret-token", mod["quick_repo_info"](repo)["origin"])
         self.assertNotIn("secret-token", mod["collect_repo_info"](repo)["remotes"]["origin"])
         combined = mod["CmdResult"](["x"], 0, "\x1b[31mred\x1b[0m", "")

@@ -1765,7 +1765,7 @@ def redact_remote_url(url: str) -> str:
     """Return a display-safe remote URL without credentials or token parameters."""
     text = (url or "").strip()
     if not text or "://" not in text:
-        return text
+        return safe_text(text)
     try:
         parsed = urlsplit(text)
     except ValueError:
@@ -1790,7 +1790,7 @@ def redact_remote_url(url: str) -> str:
         ]
         if redacted_pairs != pairs:
             query = urlencode(redacted_pairs, doseq=True)
-    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+    return safe_text(urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment)))
 
 
 def print_remotes(root: Path) -> None:
@@ -1800,8 +1800,8 @@ def print_remotes(root: Path) -> None:
         return
     for name, url in remotes.items():
         push_url = git_out(root, "remote", "get-url", "--push", name)
-        print(f"{name}\t{redact_remote_url(url)} (fetch)")
-        print(f"{name}\t{redact_remote_url(push_url or url)} (push)")
+        print(f"{safe_text(name)}\t{redact_remote_url(url)} (fetch)")
+        print(f"{safe_text(name)}\t{redact_remote_url(push_url or url)} (push)")
 
 
 def local_branch_names(root: Path) -> List[str]:
