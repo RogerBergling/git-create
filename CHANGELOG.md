@@ -2,6 +2,11 @@
 
 All notable changes to `git-create` are recorded here.
 
+## 1.11.0
+
+- Expanded branch protection into explained solo, team, and custom profiles,
+  including explicit force-push/deletion blocking and optional status checks.
+
 ## 1.10.0
 
 - Added menu option 25 for deleting the local working copy and/or the GitHub

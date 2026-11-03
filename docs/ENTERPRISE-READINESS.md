@@ -245,7 +245,7 @@ timeouts, and concurrency cancellation. Remaining work:
 - guarded local/GitHub repository deletion with backups and typed confirmations;
 - collision-resistant, private recovery backup files;
 - exclusive file creation that refuses symlinks and overwrites;
-- stricter branch-protection review-count validation;
+- solo/team/custom branch-protection profiles with force-push/deletion blocking;
 - security policy, contribution guide, CODEOWNERS, issue/PR templates;
 - Dependabot, CodeQL, pinned GitHub Actions, lint job, and Python 3.14 CI;
 - version-consistency, batch-sync, and backup-safety tests;

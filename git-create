@@ -33,10 +33,10 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from urllib.parse import quote
 
 APP = "git-create"
-VERSION = "1.10.0"
-BUILD_NUMBER = "20261102.2054"
-BUILD_DATE = "2026-11-02"
-BUILD_TIME = "20:54"
+VERSION = "1.11.0"
+BUILD_NUMBER = "20261103.0845"
+BUILD_DATE = "2026-11-03"
+BUILD_TIME = "08:45"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -1147,6 +1147,38 @@ def github_commit_verification(root: Path, owner: str, repo: str, sha: str) -> O
     except json.JSONDecodeError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def branch_protection_body(
+    reviews: int = 0,
+    enforce_admins: bool = True,
+    dismiss_stale: bool = True,
+    conversation: bool = False,
+    status_checks: Optional[Sequence[str]] = None,
+    linear_history: bool = False,
+    allow_force_pushes: bool = False,
+    allow_deletions: bool = False,
+) -> Dict[str, object]:
+    checks = [check for check in (status_checks or []) if check]
+    return {
+        "required_status_checks": {"strict": True, "contexts": checks} if checks else None,
+        "enforce_admins": enforce_admins,
+        "required_pull_request_reviews": (
+            {
+                "dismiss_stale_reviews": dismiss_stale,
+                "require_code_owner_reviews": False,
+                "required_approving_review_count": reviews,
+                "require_last_push_approval": False,
+            }
+            if reviews
+            else None
+        ),
+        "restrictions": None,
+        "required_linear_history": linear_history,
+        "allow_force_pushes": allow_force_pushes,
+        "allow_deletions": allow_deletions,
+        "required_conversation_resolution": conversation,
+    }
 
 
 def gh_repo_info(root: Path) -> Tuple[Optional[dict], str]:
@@ -3893,8 +3925,10 @@ class App:
 
                 GitHub collaboration (option 21)
                    Lists/views/creates pull requests and issues, submits PR
-                   reviews, and performs a read-only branch-protection, Actions
-                   secret-name, and workflow-run audit. Does not merge or close.
+                   reviews, performs a read-only branch-protection, Actions
+                   secret-name, and workflow-run audit, and manages branch
+                   protection profiles and repository Actions secrets. Does not
+                   merge or close.
 
                 Remotes (option 22)
                    Lists, adds, changes, renames, removes, and prunes local
@@ -6580,6 +6614,84 @@ class App:
             else:
                 warning("Unknown option.")
 
+    def explain_branch_protection(self) -> None:
+        print(
+            textwrap.dedent(
+                """                Branch protection is enforced by GitHub, not by local Git. It still helps
+                a single-owner repository because it blocks accidental force-pushes and
+                branch deletion, scripts using your token, and future collaborators.
+
+                Solo baseline (recommended for one owner):
+                  - block force pushes
+                  - block branch deletion
+                  - enforce the rule for administrators
+                  - no required pull request, approvals, or status checks
+                  Normal git push continues to work. There is no second person to approve.
+
+                Team protection:
+                  - require a pull request and approving reviews
+                  - dismiss stale approvals when new commits arrive
+                  - require conversation resolution
+                  - optionally require CI status checks
+                  - block force pushes and deletion
+
+                Custom protection lets you choose each setting. Required pull requests,
+                reviews, checks, linear history, and signed commits are stronger but can
+                block a solo owner because GitHub does not allow self-approval.
+                """
+            )
+        )
+
+    def ask_status_checks(self) -> Optional[List[str]]:
+        raw = ask(
+            "Status check names (semicolon-separated, for example: lint;test (3.9, ubuntu-22.04))",
+            allow_empty=True,
+        )
+        checks = [part.strip() for part in raw.split(";") if part.strip()]
+        if not checks:
+            failure("At least one status check name is required.")
+            return None
+        return checks
+
+    def print_branch_protection_plan(self, body: Dict[str, object]) -> None:
+        reviews = body.get("required_pull_request_reviews")
+        checks = body.get("required_status_checks")
+        print("Protection plan:")
+        print("  required pull request: " + ("yes" if reviews else "no"))
+        if isinstance(reviews, dict):
+            print("  required approvals: " + str(reviews.get("required_approving_review_count", 0)))
+            print("  dismiss stale approvals: " + ("yes" if reviews.get("dismiss_stale_reviews") else "no"))
+        if isinstance(checks, dict):
+            contexts = checks.get("contexts") or []
+            print("  required status checks: " + ", ".join(str(item) for item in contexts))
+            print("  require branches up to date: " + ("yes" if checks.get("strict") else "no"))
+        else:
+            print("  required status checks: none")
+        print("  require conversation resolution: " + ("yes" if body.get("required_conversation_resolution") else "no"))
+        print("  require linear history: " + ("yes" if body.get("required_linear_history") else "no"))
+        print("  block force pushes: " + ("yes" if not body.get("allow_force_pushes") else "no"))
+        print("  block branch deletion: " + ("yes" if not body.get("allow_deletions") else "no"))
+        print("  enforce for administrators: " + ("yes" if body.get("enforce_admins") else "no"))
+
+    def apply_branch_protection(self, path: Path, endpoint: str, body: Dict[str, object], label: str) -> bool:
+        self.print_branch_protection_plan(body)
+        if not confirm(f"Apply {label} branch protection?", False):
+            return False
+        gh = which_gh() or "gh"
+        result = run_cmd(
+            [gh, "api", "--method", "PUT", endpoint, "--input", "-"],
+            cwd=path,
+            timeout=60,
+            input_text=json.dumps(body),
+        )
+        if result.combined:
+            print(result.combined)
+        if result.returncode == 0:
+            success(f"Branch protection updated: {label}.")
+            return True
+        failure("Branch protection update failed. Admin permission may be required.")
+        return False
+
     def branch_protection_action(self, path: Path) -> None:
         parsed = parse_github_url(remote_urls(path).get("origin", ""))
         if not parsed:
@@ -6597,28 +6709,73 @@ class App:
             "Branch protection is a GitHub server-side rule that can require pull requests, "
             "reviews, status checks, or conversation resolution.",
             "It protects shared branches from accidental direct pushes and is independent of "
-            "local Git configuration.",
+            "local Git configuration. It is still useful when you are the only owner.",
             "Changing protection needs admin permission. Every write is confirmed and the app "
             "does not remove protection without a typed phrase.",
         )
         while True:
             heading(f"Branch protection: {owner}/{repo}@{branch}")
-            print("  1) Show current protection")
-            print("  2) Enable basic protection")
-            print("  3) Remove protection")
+            print("  1) Explain protection choices")
+            print("  2) Show current protection")
+            print("  3) Enable solo baseline (recommended for one owner)")
+            print("  4) Enable team protection")
+            print("  5) Enable custom protection")
+            print("  6) Remove protection (typed confirmation)")
             print("  0) Back")
             choice = ask("Choose an option", default="0", allow_empty=True)
             if choice in ("0", ""):
                 return
             if choice == "1":
+                self.explain_branch_protection()
+            elif choice == "2":
                 result = run_cmd([gh, "api", endpoint], cwd=path, timeout=60)
                 if result.returncode == 0:
                     print(result.out)
                 else:
                     warning("No protection is set or it is not readable.")
                     info(one_line(result.combined, 200))
-            elif choice == "2":
-                reviews_text = ask("Required approving reviews", default="1")
+            elif choice == "3":
+                body = branch_protection_body(
+                    reviews=0,
+                    enforce_admins=True,
+                    conversation=False,
+                    status_checks=None,
+                    linear_history=False,
+                    allow_force_pushes=False,
+                    allow_deletions=False,
+                )
+                self.apply_branch_protection(path, endpoint, body, "solo baseline")
+            elif choice == "4":
+                reviews_text = ask("Required approving reviews (1-6)", default="1")
+                try:
+                    reviews = int(reviews_text)
+                except ValueError:
+                    failure("Enter a number from 1 to 6.")
+                    continue
+                if not 1 <= reviews <= 6:
+                    failure("Enter a number from 1 to 6.")
+                    continue
+                dismiss = confirm("Dismiss stale approvals when new commits are pushed?", True)
+                conversation = confirm("Require conversation resolution before merge?", True)
+                enforce = confirm("Enforce for administrators too?", True)
+                require_checks = confirm("Require CI status checks before merge?", False)
+                checks = self.ask_status_checks() if require_checks else None
+                if require_checks and checks is None:
+                    continue
+                linear = confirm("Require linear history?", False)
+                body = branch_protection_body(
+                    reviews=reviews,
+                    enforce_admins=enforce,
+                    dismiss_stale=dismiss,
+                    conversation=conversation,
+                    status_checks=checks,
+                    linear_history=linear,
+                    allow_force_pushes=False,
+                    allow_deletions=False,
+                )
+                self.apply_branch_protection(path, endpoint, body, "team protection")
+            elif choice == "5":
+                reviews_text = ask("Required approving reviews (0-6)", default="0")
                 try:
                     reviews = int(reviews_text)
                 except ValueError:
@@ -6627,47 +6784,30 @@ class App:
                 if not 0 <= reviews <= 6:
                     failure("Enter a number from 0 to 6.")
                     continue
-                enforce = confirm("Enforce protection for administrators too?", False)
-                dismiss = confirm("Dismiss stale approvals when new commits are pushed?", True)
-                conversation = confirm("Require conversation resolution before merge?", True)
-                body = {
-                    "required_status_checks": None,
-                    "enforce_admins": enforce,
-                    "required_pull_request_reviews": (
-                        {
-                            "dismiss_stale_reviews": dismiss,
-                            "require_code_owner_reviews": False,
-                            "required_approving_review_count": reviews,
-                            "require_last_push_approval": False,
-                        }
-                        if reviews
-                        else None
-                    ),
-                    "restrictions": None,
-                    "required_conversation_resolution": conversation,
-                }
-                payload = json.dumps(body)
-                print("Protection plan:")
-                print(f"  required reviews: {reviews}" + (" (none)" if not reviews else ""))
-                if reviews:
-                    print(f"  dismiss stale: {dismiss}")
-                print(f"  require conversation resolution: {conversation}")
-                print(f"  enforce for admins: {enforce}")
-                if not confirm("Apply this branch protection?", False):
+                dismiss = confirm("Dismiss stale approvals when new commits are pushed?", True) if reviews else True
+                conversation = confirm("Require conversation resolution before merge?", False)
+                enforce = confirm("Enforce for administrators too?", True)
+                require_checks = confirm("Require CI status checks before merge?", False)
+                checks = self.ask_status_checks() if require_checks else None
+                if require_checks and checks is None:
                     continue
-                result = run_cmd(
-                    [gh, "api", "--method", "PUT", endpoint, "--input", "-"],
-                    cwd=path,
-                    timeout=60,
-                    input_text=payload,
+                linear = confirm("Require linear history?", False)
+                allow_force = confirm("Allow force pushes? (not recommended)", False)
+                allow_delete = confirm("Allow branch deletion? (not recommended)", False)
+                if allow_force or allow_delete:
+                    warning("Allowing force pushes or deletion weakens branch protection.")
+                body = branch_protection_body(
+                    reviews=reviews,
+                    enforce_admins=enforce,
+                    dismiss_stale=dismiss,
+                    conversation=conversation,
+                    status_checks=checks,
+                    linear_history=linear,
+                    allow_force_pushes=allow_force,
+                    allow_deletions=allow_delete,
                 )
-                if result.combined:
-                    print(result.combined)
-                if result.returncode == 0:
-                    success("Branch protection updated.")
-                else:
-                    failure("Branch protection update failed. Admin permission may be required.")
-            elif choice == "3":
+                self.apply_branch_protection(path, endpoint, body, "custom protection")
+            elif choice == "6":
                 phrase = "DISABLE PROTECTION"
                 typed = ask(f'Type "{phrase}" to remove branch protection', allow_empty=True)
                 if typed != phrase:

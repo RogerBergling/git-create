@@ -639,28 +639,62 @@ class InteractiveTests(unittest.TestCase):
         )
         app = mod["App"]()
         app.project = self.repo
-        options = iter(["2", "0"])
+        options = iter(["3", "0"])
 
         def ask(prompt, default=None, allow_empty=False):
             if prompt.startswith("Choose an option"):
                 return next(options)
-            if prompt.startswith("Required approving reviews"):
-                return "1"
             return default if default is not None else ""
 
-        def confirm(prompt, default=False):
-            return "Enforce protection" not in prompt
-
-        self.patch_globals(mod["App"].branch_protection_action, ask=ask, confirm=confirm)
+        self.patch_globals(mod["App"].branch_protection_action, ask=ask, confirm=lambda p, d=False: True)
         app.branch_protection_action(self.repo)
         self.assertIn(
             "api --method PUT repos/owner/repo/branches/main/protection --input -",
             log.read_text(encoding="utf-8"),
         )
         body = json.loads(payload.read_text(encoding="utf-8"))
-        self.assertEqual(body["required_pull_request_reviews"]["required_approving_review_count"], 1)
+        self.assertIsNone(body["required_pull_request_reviews"])
+        self.assertTrue(body["enforce_admins"])
+        self.assertFalse(body["allow_force_pushes"])
+        self.assertFalse(body["allow_deletions"])
+
+    def test_team_branch_protection_with_status_checks(self) -> None:
+        mod = self.load()
+        log, payload, _ = self.install_fake_gh()
+        subprocess.run(
+            ["git", "remote", "add", "origin", "git@github.com:owner/repo.git"],
+            cwd=self.repo,
+            check=True,
+        )
+        app = mod["App"]()
+        app.project = self.repo
+        options = iter(["4", "0"])
+
+        def ask(prompt, default=None, allow_empty=False):
+            if prompt.startswith("Choose an option"):
+                return next(options)
+            if prompt.startswith("Required approving reviews"):
+                return "2"
+            if prompt.startswith("Status check names"):
+                return "lint;test (3.9, ubuntu-22.04)"
+            return default if default is not None else ""
+
+        self.patch_globals(mod["App"].branch_protection_action, ask=ask, confirm=lambda p, d=False: True)
+        app.branch_protection_action(self.repo)
+        self.assertIn(
+            "api --method PUT repos/owner/repo/branches/main/protection --input -",
+            log.read_text(encoding="utf-8"),
+        )
+        body = json.loads(payload.read_text(encoding="utf-8"))
+        self.assertEqual(body["required_pull_request_reviews"]["required_approving_review_count"], 2)
+        self.assertEqual(
+            body["required_status_checks"]["contexts"],
+            ["lint", "test (3.9, ubuntu-22.04)"],
+        )
         self.assertTrue(body["required_conversation_resolution"])
-        self.assertFalse(body["enforce_admins"])
+        self.assertTrue(body["enforce_admins"])
+        self.assertFalse(body["allow_force_pushes"])
+        self.assertFalse(body["allow_deletions"])
 
     def test_actions_secret_set_with_fake_gh(self) -> None:
         mod = self.load()

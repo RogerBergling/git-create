@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.10.0**. Build **20261102.2054**, built **2026-11-02 20:54**.
+Current version: **1.11.0**. Build **20261103.0845**, built **2026-11-03 08:45**.
 
 The main menu shows the version, build number, and build timestamp on every
 render. `git-create --version` prints the same build metadata.
@@ -888,8 +888,9 @@ Menu option **21** uses authenticated `gh` commands for:
 - optional failed-log output (`gh run view --log-failed`) for the latest GHCR
   run
 - optional `gh run watch` for the latest GHCR workflow run
-- branch protection management: view, enable basic protection, or remove it
-  by typing `DISABLE PROTECTION`
+- branch protection management with explicit profiles: view current settings,
+  enable a solo baseline, enable team protection, build a custom policy, or
+  remove protection by typing `DISABLE PROTECTION`
 - repository Actions secret management: list names, set/replace a secret via a
   non-echoed prompt, or delete it by typing `DELETE SECRET <NAME>`
 
@@ -898,6 +899,35 @@ publishes an action under your GitHub account and requires confirmation. Secret
 values are read without echo and passed on stdin; they are never printed.
 Admin-scope failures are reported, not bypassed. The menu does not merge, close,
 delete, or dismiss pull requests/issues.
+
+### Branch protection choices
+
+Menu **21 → 9** offers:
+
+| Choice | Policy |
+| --- | --- |
+| Explain choices | Prints the trade-offs before anything is changed. |
+| Show current protection | Reads the existing rule. |
+| Solo baseline | Blocks force pushes and branch deletion, enforces the rule for administrators, and requires no pull request, approvals, or status checks. Normal pushes still work. |
+| Team protection | Requires a pull request and 1–6 approvals, dismisses stale approvals, requires conversation resolution, optionally requires CI status checks, and blocks force pushes/deletion. |
+| Custom | Chooses reviews, status checks, linear history, administrator enforcement, force pushes, and deletion independently. |
+| Remove | Deletes the protection rule only after typing `DISABLE PROTECTION`. |
+
+Branch protection is server-side. It is still useful when you are the only
+owner: it protects against accidental force-pushes, remote branch deletion,
+scripts using your token, and future collaborators. Required reviews can block a
+solo owner because GitHub does not allow self-approval; use the solo baseline if
+you do not want that friction.
+
+Status check names are entered semicolon-separated, for example:
+
+```text
+lint;test (3.9, ubuntu-22.04)
+```
+
+The menu does not configure signed-commit requirements, required deployments,
+organization rulesets, or code-owner review selection; use GitHub's repository
+settings for those advanced policies.
 
 ## Remotes
 
@@ -1115,9 +1145,11 @@ dedicated tool.
 - The secret scan is a guardrail, not a complete security scanner. It checks
   common private-key and token patterns and has file/size limits.
 - Binary files and files larger than 1 MiB are not content-scanned.
-- Branch protection supports a basic policy, not every GitHub protection
-  option. Actions secrets are repository-level only; organization, environment,
-  Codespaces, and Dependabot scopes are not managed.
+- Branch protection supports solo, team, and custom repository-branch policies,
+  but not signed-commit requirements, required deployments, organization-level
+  rulesets, or code-owner review selection. Actions secrets are repository-level
+  only; organization, environment, Codespaces, and Dependabot scopes are not
+  managed.
 - Conflict resolution is file-level. The app does not auto-resolve conflicts,
   choose a side without confirmation, or auto-continue a merge/rebase.
 - Rebase refuses ranges over 200 commits because checking whether every commit
