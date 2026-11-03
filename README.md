@@ -13,13 +13,53 @@ render. `git-create --version` prints the same build metadata.
 
 [![CI](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml/badge.svg)](https://github.com/RogerBergling/git-create/actions/workflows/ci.yml)
 
+**New here? Start with the [Easy start](#easy-start).**
+
+## Easy start
+
+This is the short version. You need Linux, Python 3.9+, and Git. GitHub
+features also need `gh` and an SSH key.
+
+```bash
+git clone https://github.com/RogerBergling/git-create.git
+cd git-create
+chmod +x git-create
+./git-create
+```
+
+Already have the file? Copy `git-create` anywhere, make it executable, and run
+it from the project folder:
+
+```bash
+chmod +x git-create
+./git-create
+```
+
+The first screen runs a local quick check. Then:
+
+| I want to... | Choose |
+| --- | --- |
+| Check an existing repository | `1` |
+| Create a new GitHub repository | `4` |
+| Clone a GitHub repository | `5` |
+| Publish a local project | `6` |
+| Commit and push changes | `8` |
+| Scan a folder and act on many repositories | `2` |
+| See the full menu and explanations | `12` |
+
+The app shows the command, explains why it is needed, and asks before changing
+anything. It never force-pushes or rewrites shared history automatically.
+Detailed setup, verification, branch protection, batch operations, and
+troubleshooting continue below.
+
 ## Contents
 
+- [Easy start](#easy-start)
 - [Why I built this app](#why-i-built-this-app)
 - [Why Python instead of a shell script or an ELF?](#why-python-instead-of-a-shell-script-or-an-elf)
 - [Requirements](#requirements)
 - [Installation](#installation)
-- [Quick start](#quick-start)
+- [Detailed walkthrough](#detailed-walkthrough)
 - [Interactive directory picker](#interactive-directory-picker)
 - [Screenshots](#screenshots)
 - [Git in plain English](#git-in-plain-english)
@@ -207,7 +247,7 @@ The current working directory is always the source of truth. If you run the
 script from a project root, that project is detected automatically. If you run
 it from elsewhere, use **option 3** to select a project.
 
-## Quick start
+## Detailed walkthrough
 
 ```bash
 cd ~/Projects
