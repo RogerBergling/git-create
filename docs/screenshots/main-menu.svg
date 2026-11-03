@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1100" height="1124" viewBox="0 0 1100 1124" role="img" aria-labelledby="title desc">
-<title id="title">git-create 1.11.0  ·  ~/Projects/demo-project</title>
+<title id="title">git-create 1.11.1  ·  ~/Projects/demo-project</title>
 <desc id="desc">Terminal screenshot of the git-create menu-driven Git assistant.</desc>
 <rect width="100%" height="100%" fill="#010409"/>
 <rect x="1" y="1" width="1098" height="1122" rx="12" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
@@ -8,11 +8,11 @@
 <circle cx="30" cy="28" r="6" fill="#ff5f56"/>
 <circle cx="50" cy="28" r="6" fill="#ffbd2e"/>
 <circle cx="70" cy="28" r="6" fill="#27c93f"/>
-<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create 1.11.0  ·  ~/Projects/demo-project</text>
-<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">git-create 1.11.0 - safe Git/GitHub project assistant</text>
+<text x="94" y="33" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="12">git-create 1.11.1  ·  ~/Projects/demo-project</text>
+<text xml:space="preserve" x="28" y="84" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">git-create 1.11.1 - safe Git/GitHub project assistant</text>
 <text xml:space="preserve" x="28" y="106" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Active project: ~/Projects/demo-project</text>
 <text xml:space="preserve" x="28" y="128" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">New to Git? Option 12 explains the concepts, commands, and why they are used.</text>
-<text xml:space="preserve" x="28" y="150" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Version 1.11.0 · Build 20261103.0845 · 2026-11-03 08:45</text>
+<text xml:space="preserve" x="28" y="150" fill="#8b949e" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Version 1.11.1 · Build 20261103.1715 · 2026-11-03 17:15</text>
 <text xml:space="preserve" x="28" y="172" fill="#58a6ff" font-weight="600" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">Quick check (local, no network)</text>
 <text xml:space="preserve" x="28" y="194" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> git - git version 2.53.0</text>
 <text xml:space="preserve" x="28" y="216" fill="#c9d1d9" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="14.5">  <tspan fill="#3fb950" font-weight="700">[OK]</tspan> GitHub CLI (gh) - gh version 2.46.0</text>

@@ -30,13 +30,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 APP = "git-create"
-VERSION = "1.11.0"
-BUILD_NUMBER = "20261103.0845"
+VERSION = "1.11.1"
+BUILD_NUMBER = "20261103.1715"
 BUILD_DATE = "2026-11-03"
-BUILD_TIME = "08:45"
+BUILD_TIME = "17:15"
 HOME = Path.home()
 
 DEFAULT_PROJECTS = HOME / "Projects"
@@ -623,8 +623,32 @@ def term_width() -> int:
     return max(60, min(width, 118))
 
 
+ANSI_ESCAPE_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+SENSITIVE_QUERY_KEYS = {
+    "access_token",
+    "apikey",
+    "api_key",
+    "auth",
+    "key",
+    "password",
+    "passwd",
+    "secret",
+    "token",
+}
+
+
+def safe_text(text: str) -> str:
+    """Remove terminal control sequences from untrusted displayed text."""
+    value = ANSI_ESCAPE_RE.sub("", text or "")
+    return "".join(
+        char
+        for char in value
+        if char in "\n\t" or (ord(char) >= 32 and ord(char) != 127 and not 0x80 <= ord(char) <= 0x9F)
+    )
+
+
 def one_line(text: str, limit: int = 160) -> str:
-    value = " ".join((text or "").split())
+    value = " ".join(safe_text(text).split())
     if len(value) > limit:
         return value[: limit - 3] + "..."
     return value
@@ -632,7 +656,7 @@ def one_line(text: str, limit: int = 160) -> str:
 
 def wrap(text: str, indent: str = "        ") -> str:
     return textwrap.fill(
-        text,
+        safe_text(text),
         width=term_width(),
         subsequent_indent=indent,
         break_long_words=False,
@@ -772,24 +796,24 @@ def print_report(report: Report, only_problems: bool = False) -> None:
 
 def heading(title: str) -> None:
     print()
-    print(col(title, "bold"))
+    print(col(safe_text(title), "bold"))
     print(col("-" * min(len(title), term_width()), "dim"))
 
 
 def success(message: str) -> None:
-    print(col("[OK] ", "green") + message)
+    print(col("[OK] ", "green") + safe_text(message))
 
 
 def warning(message: str) -> None:
-    print(col("[!] ", "yellow") + message)
+    print(col("[!] ", "yellow") + safe_text(message))
 
 
 def failure(message: str) -> None:
-    print(col("[X] ", "red") + message)
+    print(col("[X] ", "red") + safe_text(message))
 
 
 def info(message: str) -> None:
-    print(col("[i] ", "cyan") + message)
+    print(col("[i] ", "cyan") + safe_text(message))
 
 
 def explain(what: str, why: str, safety: str = "") -> None:
@@ -819,7 +843,7 @@ class CmdResult:
 
     @property
     def combined(self) -> str:
-        return (self.out + ("\n" if self.out and self.err else "") + self.err).strip()
+        return safe_text((self.out + ("\n" if self.out and self.err else "") + self.err).strip())
 
 
 def run_cmd(
@@ -923,6 +947,10 @@ def git(path: Path, *args: object, timeout: int = 30, env_extra: Optional[Dict[s
 def git_out(path: Path, *args: object) -> str:
     result = git(path, *args)
     return result.out.strip() if result.returncode == 0 else ""
+
+
+def safe_git_out(path: Path, *args: object) -> str:
+    return safe_text(git_out(path, *args))
 
 
 def remote_env() -> Dict[str, str]:
@@ -1058,7 +1086,11 @@ def signing_url_rewrite(config: Dict[str, List[str]]) -> bool:
             if base.rstrip("/") != "git@github.com:":
                 continue
             for value in values:
-                if value.rstrip("/").startswith("https://github.com"):
+                try:
+                    parsed = urlsplit(value.strip())
+                except ValueError:
+                    continue
+                if parsed.scheme == "https" and parsed.hostname == "github.com":
                     return True
     return False
 
@@ -1552,6 +1584,14 @@ def detect_git_root(path: Path) -> Optional[Path]:
     return Path(value).resolve() if value else None
 
 
+def path_is_within(root: Path, candidate: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def git_path(root: Path, name: str) -> Path:
     result = git(root, "rev-parse", "--git-path", name, timeout=10)
     if result.returncode != 0 or not result.out.strip():
@@ -1719,6 +1759,49 @@ def remote_urls(root: Path) -> Dict[str, str]:
         if url:
             remotes[name] = url
     return remotes
+
+
+def redact_remote_url(url: str) -> str:
+    """Return a display-safe remote URL without credentials or token parameters."""
+    text = (url or "").strip()
+    if not text or "://" not in text:
+        return text
+    try:
+        parsed = urlsplit(text)
+    except ValueError:
+        return "<redacted-url>"
+    netloc = parsed.netloc
+    if parsed.username is not None:
+        host = parsed.hostname or ""
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port:
+            host = f"{host}:{port}"
+        if parsed.password is not None or parsed.scheme in ("http", "https"):
+            netloc = "<redacted>@" + host
+    query = parsed.query
+    if query:
+        pairs = parse_qsl(query, keep_blank_values=True)
+        redacted_pairs = [
+            (key, "<redacted>" if key.lower() in SENSITIVE_QUERY_KEYS else value)
+            for key, value in pairs
+        ]
+        if redacted_pairs != pairs:
+            query = urlencode(redacted_pairs, doseq=True)
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
+
+
+def print_remotes(root: Path) -> None:
+    remotes = remote_urls(root)
+    if not remotes:
+        print("  (no remotes)")
+        return
+    for name, url in remotes.items():
+        push_url = git_out(root, "remote", "get-url", "--push", name)
+        print(f"{name}\t{redact_remote_url(url)} (fetch)")
+        print(f"{name}\t{redact_remote_url(push_url or url)} (push)")
 
 
 def local_branch_names(root: Path) -> List[str]:
@@ -2170,6 +2253,7 @@ def build_project_report(
     tracked = tracked_files(root)
     remotes = remote_urls(root)
     origin_url = remotes.get("origin", "")
+    origin_display = redact_remote_url(origin_url)
     github_remote = parse_github_url(origin_url) if origin_url else None
     branch = git_out(root, "symbolic-ref", "--short", "-q", "HEAD")
     detached = not branch
@@ -2290,7 +2374,7 @@ def build_project_report(
             )
         )
     else:
-        repository.checks.append(Check("PASS", "Remotes", f"origin = {origin_url}"))
+        repository.checks.append(Check("PASS", "Remotes", f"origin = {origin_display}"))
 
     if origin_url:
         if origin_url.startswith(("http://", "git://")):
@@ -2298,7 +2382,7 @@ def build_project_report(
                 Check(
                     "WARN",
                     "Remote URL",
-                    origin_url,
+                    origin_display,
                     "Use SSH (git@github.com:...) or HTTPS with the recommended insteadOf rewrite.",
                 )
             )
@@ -2314,7 +2398,7 @@ def build_project_report(
         elif origin_url.startswith(("git@github.com:", "ssh://git@github.com/")):
             repository.checks.append(Check("PASS", "Remote URL", "SSH"))
         else:
-            repository.checks.append(Check("INFO", "Remote URL", one_line(origin_url, 120)))
+            repository.checks.append(Check("INFO", "Remote URL", one_line(origin_display, 120)))
 
     upstream = git_out(root, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
     if not upstream:
@@ -3233,12 +3317,29 @@ def write_exclusive_text(path: Path, content: str, mode: int = 0o644) -> bool:
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(content)
-        os.chmod(path, mode)
+            os.fchmod(handle.fileno(), mode)
     except OSError:
         try:
             path.unlink()
         except OSError:
             pass
+        return False
+    return True
+
+
+def append_text_no_follow(path: Path, content: str) -> bool:
+    """Append to an existing file without following a symlink."""
+    flags = os.O_WRONLY | os.O_APPEND
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(str(path), flags)
+    except OSError:
+        return False
+    try:
+        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
+            handle.write(content)
+    except OSError:
         return False
     return True
 
@@ -3292,10 +3393,11 @@ def ensure_gitignore(root: Path, ask_first: bool = True, confirm_changes: bool =
         existing = path.read_text(encoding="utf-8", errors="replace")
         prefix = "" if not existing or existing.endswith("\n") else "\n"
         block = prefix + "\n# git-create: secret and safety patterns\n" + "\n".join(additions) + "\n"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(block)
     except OSError as exc:
-        failure(f"could not update .gitignore: {exc}")
+        failure(f"could not read .gitignore: {exc}")
+        return False
+    if not append_text_no_follow(path, block):
+        failure(f"could not safely update .gitignore: {path}")
         return False
     success(f"updated {path}")
     return True
@@ -3321,10 +3423,11 @@ def ensure_dockerignore(root: Path, ask_first: bool = True, confirm_changes: boo
         existing = path.read_text(encoding="utf-8", errors="replace")
         prefix = "" if not existing or existing.endswith("\n") else "\n"
         block = prefix + "\n# git-create: Docker context safety patterns\n" + "\n".join(missing) + "\n"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(block)
     except OSError as exc:
-        failure(f"could not update .dockerignore: {exc}")
+        failure(f"could not read .dockerignore: {exc}")
+        return False
+    if not append_text_no_follow(path, block):
+        failure(f"could not safely update .dockerignore: {path}")
         return False
     success(f"updated {path}")
     return True
@@ -3408,10 +3511,11 @@ def install_precommit_hook(root: Path) -> bool:
         return False
     try:
         hook.parent.mkdir(parents=True, exist_ok=True)
-        hook.write_text(PRE_COMMIT_HOOK, encoding="utf-8")
-        os.chmod(hook, 0o755)
     except OSError as exc:
-        failure(f"Could not install hook: {exc}")
+        failure(f"Could not create hook directory: {exc}")
+        return False
+    if not write_exclusive_text(hook, PRE_COMMIT_HOOK, 0o755):
+        failure(f"Could not safely install hook: {hook}")
         return False
     success(f"Installed pre-commit hook: {hook}")
     return True
@@ -4346,7 +4450,7 @@ class App:
             command = ["git", "pull", "--ff-only", "--no-rebase"]
             print("Command: " + col(shlex.join(command), "dim"))
             code = run_streaming(command, cwd=root, timeout=120, env_extra=remote_env())
-            print(git_out(root, "status", "--short", "--branch"))
+            print(safe_git_out(root, "status", "--short", "--branch"))
             if code == 0:
                 succeeded += 1
                 success(f"{name}: fast-forward pull complete.")
@@ -4455,7 +4559,7 @@ class App:
             command = ["git", "push", remote_name, f"{branch}:{remote_branch}"]
             print("Command: " + col(shlex.join(command), "dim"))
             code = run_streaming(command, cwd=root, timeout=300, env_extra=remote_env())
-            print(git_out(root, "status", "--short", "--branch"))
+            print(safe_git_out(root, "status", "--short", "--branch"))
             if code == 0:
                 succeeded += 1
                 success(f"{name}: push complete.")
@@ -4981,7 +5085,7 @@ class App:
             elif choice == "4":
                 self.abort_merge_rebase(path)
             elif choice == "5":
-                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+                print(safe_git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
             elif choice == "6":
                 self.resolve_conflicts_action(path)
             else:
@@ -5278,7 +5382,7 @@ class App:
                 if tag not in tag_names(path):
                     failure(f"Unknown tag: {tag}")
                     continue
-                print(git_out(path, "show", "--no-patch", "--format=fuller", "--decorate", tag))
+                print(safe_git_out(path, "show", "--no-patch", "--format=fuller", "--decorate", tag))
                 verify = git(path, "tag", "-v", tag, timeout=30)
                 print(verify.combined or "(no signature verification output)")
             elif choice == "4":
@@ -5578,7 +5682,7 @@ class App:
             warning("Dry-run mode is ON: remote changes are shown but not executed.")
         while True:
             heading("Remotes")
-            print(git_out(path, "remote", "-v") or "  (no remotes)")
+            print_remotes(path)
             print()
             print("  1) List remotes")
             print("  2) Add a remote")
@@ -5592,7 +5696,7 @@ class App:
                 return
             remotes = remote_urls(path)
             if choice == "1":
-                print(git_out(path, "remote", "-v") or "No remotes.")
+                print_remotes(path)
             elif choice in ("2", "3", "4", "5", "6"):
                 if choice == "2":
                     name = ask("New remote name", default="origin")
@@ -5702,24 +5806,24 @@ class App:
             if choice in ("0", ""):
                 return
             if choice == "1":
-                print(git_out(path, "status", "-sb"))
+                print(safe_git_out(path, "status", "-sb"))
                 print()
                 print(col("Staged:", "bold"))
-                print(git_out(path, "diff", "--cached", "--stat") or "(nothing)")
+                print(safe_git_out(path, "diff", "--cached", "--stat") or "(nothing)")
                 print(col("Unstaged:", "bold"))
-                print(git_out(path, "diff", "--stat") or "(nothing)")
+                print(safe_git_out(path, "diff", "--stat") or "(nothing)")
             elif choice == "2":
                 show_diff(path, cached=True)
             elif choice == "3":
                 show_diff(path, cached=False)
             elif choice == "4":
-                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+                print(safe_git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
             elif choice == "5":
                 revision = ask("Commit to show", default="HEAD")
                 if git(path, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}").returncode != 0:
                     failure(f"Unknown commit: {revision}")
                     continue
-                print(git_out(path, "show", "--stat", "--oneline", "--decorate", revision))
+                print(safe_git_out(path, "show", "--stat", "--oneline", "--decorate", revision))
             elif choice == "6":
                 filename = ask("Path to inspect (relative to repository root)")
                 result = git(path, "log", "--follow", "--oneline", "-n", "30", "--", filename, timeout=30)
@@ -5729,11 +5833,11 @@ class App:
                     print(result.out or "(no history for that path)")
             elif choice == "7":
                 print(col("Remotes:", "bold"))
-                print(git_out(path, "remote", "-v") or "(none)")
+                print_remotes(path)
                 print(col("Branches:", "bold"))
-                print(git_out(path, "branch", "-vv") or "(none)")
+                print(safe_git_out(path, "branch", "-vv") or "(none)")
                 print(col("Tags:", "bold"))
-                print(git_out(path, "tag", "--list", "--sort=-creatordate") or "(none)")
+                print(safe_git_out(path, "tag", "--list", "--sort=-creatordate") or "(none)")
             else:
                 warning("Unknown option.")
 
@@ -5768,7 +5872,7 @@ class App:
             if choice in ("0", ""):
                 return
             if choice == "1":
-                print(git_out(path, "worktree", "list") or "(no worktrees)")
+                print(safe_git_out(path, "worktree", "list") or "(no worktrees)")
             elif choice == "2":
                 default_path = path.parent / f"{path.name}-worktree"
                 target = ask_path("New worktree path", default=default_path, new_path=True)
@@ -5860,7 +5964,7 @@ class App:
                     else:
                         failure("Worktree prune failed.")
             elif choice == "5":
-                print(git_out(path, "submodule", "status", "--recursive") or "(no submodules)")
+                print(safe_git_out(path, "submodule", "status", "--recursive") or "(no submodules)")
             elif choice == "6":
                 if not (path / ".gitmodules").exists():
                     info("No .gitmodules file found.")
@@ -6093,7 +6197,7 @@ class App:
             if choice in ("0", ""):
                 return
             if choice == "1":
-                print(git_out(path, "branch", "-vv"))
+                print(safe_git_out(path, "branch", "-vv"))
             elif choice == "2":
                 self.create_branch(path)
             elif choice == "3":
@@ -6107,7 +6211,7 @@ class App:
             elif choice == "7":
                 self.set_upstream(path)
             elif choice == "8":
-                print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
+                print(safe_git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "40"))
             elif choice == "9":
                 self.rename_remote_branch(path)
             else:
@@ -7076,6 +7180,9 @@ class App:
         if not (path / ".dockerignore").exists():
             warning(".dockerignore was not created; the Docker build context may include .git, secrets, or large files.")
         if not workflow.exists():
+            if not path_is_within(path, workflow):
+                failure("Refusing to write the GHCR workflow through a path outside the repository.")
+                return
             workflow_branch = remote_default_branch(path) or git_out(path, "symbolic-ref", "--short", "-q", "HEAD") or "main"
             content = (
                 GHCR_WORKFLOW_TEMPLATE
@@ -7550,9 +7657,9 @@ class App:
         else:
             print(col("No common ancestor found.", "red"))
         print()
-        print(git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "30"))
+        print(safe_git_out(path, "log", "--oneline", "--graph", "--decorate", "--all", "-n", "30"))
         print()
-        print(git_out(path, "branch", "-avv"))
+        print(safe_git_out(path, "branch", "-avv"))
         print()
         print(f"Local is {col(str(ahead), 'cyan')} commit(s) ahead and {col(str(behind), 'cyan')} commit(s) behind {remote_ref}.")
 
@@ -7589,7 +7696,7 @@ class App:
                 command = ["git", "pull", "--ff-only", "origin", branch]
                 print("Command: " + col(shlex.join(command), "dim"))
                 code = run_streaming(command, cwd=path, timeout=180, env_extra=remote_env())
-                print(git_out(path, "status", "--short", "--branch"))
+                print(safe_git_out(path, "status", "--short", "--branch"))
                 if code == 0:
                     success("Fast-forward pull completed. Backup branch kept locally.")
                 else:
@@ -7626,7 +7733,7 @@ class App:
             return False
         print()
         print(col("Staged changes:", "bold"))
-        print(git_out(path, "diff", "--cached", "--stat"))
+        print(safe_git_out(path, "diff", "--cached", "--stat"))
         show_staged_diff(path)
         precommit = git_out(path, "config", "--get", "gitcreate.precommit")
         managed_hook = is_managed_precommit_hook(path)
@@ -7756,7 +7863,7 @@ class App:
         print()
         print("Command: " + col(shlex.join(command), "dim"))
         code = run_streaming(command, cwd=path, timeout=300, env_extra=remote_env())
-        print(git_out(path, "status", "--short", "--branch"))
+        print(safe_git_out(path, "status", "--short", "--branch"))
         if code == 0:
             success(f"Pushed branch '{branch}'.")
             return True
@@ -7777,7 +7884,7 @@ class App:
         origin_url = remotes.get("origin", "")
         github = parse_github_url(origin_url) if origin_url else None
         print("Current local folder: " + old_folder)
-        print("Origin: " + (origin_url or "(none)"))
+        print("Origin: " + redact_remote_url(origin_url or "(none)"))
         print()
         print(col("Git does not track the directory name itself.", "dim"))
         print("This action can rename the local folder and/or the GitHub repository. It never rewrites history.")
@@ -8336,10 +8443,15 @@ class App:
                 current = path.read_text(encoding="utf-8", errors="replace")
                 if current and not current.endswith("\n"):
                     prefix = "\n"
-            with path.open("a", encoding="utf-8") as handle:
-                handle.write(prefix + line + "\n")
         except OSError as exc:
-            failure(f"Could not update {path}: {exc}")
+            failure(f"Could not read {path}: {exc}")
+            return None
+        if path.exists():
+            if not append_text_no_follow(path, prefix + line + "\n"):
+                failure(f"Could not safely update {path}")
+                return None
+        elif not write_exclusive_text(path, line + "\n"):
+            failure(f"Could not safely create {path}")
             return None
         success(f"updated {path}")
         set_global_config("gpg.ssh.allowedSignersFile", str(path))
@@ -8659,7 +8771,7 @@ def print_signing_help() -> None:
 
 
 def origin_display(path: Path) -> str:
-    return remote_urls(path).get("origin", "(none)")
+    return redact_remote_url(remote_urls(path).get("origin", "(none)"))
 
 
 # ---------------------------------------------------------------------------
@@ -8852,7 +8964,7 @@ def create_repo_archive(root: Path) -> Optional[Path]:
         with os.fdopen(descriptor, "wb") as handle:
             with tarfile.open(fileobj=handle, mode="w:gz") as bundle:
                 bundle.add(str(root), arcname=root.name)
-        os.chmod(archive, 0o600)
+            os.fchmod(handle.fileno(), 0o600)
     except (OSError, tarfile.TarError) as exc:
         try:
             archive.unlink()
@@ -9025,7 +9137,9 @@ def collect_repo_info(root: Path) -> Dict[str, object]:
             "conflicts": counts["conflicts"],
             "clean": not bool(entries),
         },
-        "remotes": remote_urls(root),
+        "remotes": {
+            name: redact_remote_url(url) for name, url in remote_urls(root).items()
+        },
         "local_branches": local_branch_names(root),
         "remote_branches": remote_branch_names(root),
         "tags": tag_names(root),
@@ -9065,7 +9179,7 @@ def quick_repo_info(path: Path) -> Optional[Dict[str, object]]:
         "ahead": ahead,
         "behind": behind,
         "upstream": upstream,
-        "origin": remotes.get("origin", ""),
+        "origin": redact_remote_url(remotes.get("origin", "")),
         "last_commit": last,
     }
 

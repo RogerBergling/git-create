@@ -41,6 +41,14 @@ Reports are handled on a best-effort basis. The maintainer will acknowledge a
 report, assess severity, prepare a fix, and coordinate disclosure. No response
 or remediation SLA is offered unless a separate support agreement exists.
 
+## Trusted repositories
+
+Treat every repository, submodule, and workflow log as untrusted input. Git
+hooks, `.gitattributes` filters, `core.hooksPath`, submodule operations, and the
+optional `gitcreate.precommit` command can execute code with your permissions.
+Review a repository before running the app on it, and do not run the app with
+elevated privileges.
+
 ## Security design notes
 
 - The runtime has no third-party Python dependencies.
@@ -50,4 +58,8 @@ or remediation SLA is offered unless a separate support agreement exists.
   printed by the application.
 - Destructive actions use typed confirmations and local safety refs or patches.
 - Recovery files are created exclusively with private (`0600`) permissions.
+- Remote URLs displayed in reports and JSON are redacted; token query parameters
+  and embedded credentials are not printed.
+- External Git and `gh` output is stripped of terminal control sequences before
+  display.
 - The application never force-pushes or rewrites shared history automatically.

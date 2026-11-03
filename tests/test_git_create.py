@@ -186,6 +186,33 @@ class GitCreateTests(unittest.TestCase):
         (repo / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
         self.assertIn(".dockerignore", mod["safe_file_fix_plan"](repo))
 
+    def test_remote_url_redaction_and_terminal_sanitization(self) -> None:
+        import runpy
+
+        repo = self.make_repo()
+        subprocess.run(
+            ["git", "remote", "add", "origin", "https://user:secret-token@github.com/owner/repo.git"],
+            cwd=repo,
+            check=True,
+        )
+        mod = runpy.run_path(str(APP), run_name="git_create_redaction_test")
+        redacted = mod["redact_remote_url"]("https://user:secret-token@github.com/owner/repo.git")
+        self.assertNotIn("secret-token", redacted)
+        self.assertNotIn("user", redacted)
+        self.assertIn("<redacted>@github.com", redacted)
+        self.assertEqual(
+            mod["redact_remote_url"]("git@github.com:owner/repo.git"),
+            "git@github.com:owner/repo.git",
+        )
+        self.assertNotIn("secret-token", mod["quick_repo_info"](repo)["origin"])
+        self.assertNotIn("secret-token", mod["collect_repo_info"](repo)["remotes"]["origin"])
+        combined = mod["CmdResult"](["x"], 0, "\x1b[31mred\x1b[0m", "")
+        self.assertEqual(combined.combined, "red")
+        config = {"url.git@github.com:.insteadof": ["https://github.com/"]}
+        self.assertTrue(mod["signing_url_rewrite"](config))
+        config = {"url.git@github.com:.insteadof": ["https://github.com.evil.example/"]}
+        self.assertFalse(mod["signing_url_rewrite"](config))
+
     def test_path_resolution_and_text_fallback(self) -> None:
         import runpy
 
@@ -213,6 +240,20 @@ class GitCreateTests(unittest.TestCase):
         link.symlink_to(target)
         self.assertFalse(mod["write_exclusive_text"](link, "third", 0o600))
         self.assertEqual(target.read_text(encoding="utf-8"), "first")
+        append_target = repo / "append.txt"
+        self.assertTrue(mod["write_exclusive_text"](append_target, "one", 0o600))
+        self.assertTrue(mod["append_text_no_follow"](append_target, "two"))
+        self.assertEqual(append_target.read_text(encoding="utf-8"), "onetwo")
+        append_link = repo / "append-link"
+        append_link.symlink_to(append_target)
+        self.assertFalse(mod["append_text_no_follow"](append_link, "bad"))
+        self.assertEqual(append_target.read_text(encoding="utf-8"), "onetwo")
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        linked_dir = repo / "linked-dir"
+        linked_dir.symlink_to(outside, target_is_directory=True)
+        self.assertTrue(mod["path_is_within"](repo, repo / "safe.txt"))
+        self.assertFalse(mod["path_is_within"](repo, linked_dir / "escape.txt"))
 
 
 if __name__ == "__main__":

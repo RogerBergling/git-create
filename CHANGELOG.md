@@ -2,6 +2,16 @@
 
 All notable changes to `git-create` are recorded here.
 
+## 1.11.1
+
+- Redacted credentials and token query parameters from displayed and JSON
+  remote URLs.
+- Sanitized terminal control sequences from external Git/`gh` output.
+- Hardened file writes against symlink races, parent symlink escapes, and
+  post-write permission changes.
+- Fixed GitHub URL rewrite validation to require the exact GitHub host.
+- Documented the trusted-repository boundary for hooks and submodules.
+
 ## 1.11.0
 
 - Expanded branch protection into explained solo, team, and custom profiles,

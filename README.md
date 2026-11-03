@@ -6,7 +6,7 @@ publish, verify, rename, branch, undo/revert, containerize, commit, push, and
 diagnose projects without missing important Git settings, SSH signing
 configuration, secret files, or remote history problems.
 
-Current version: **1.11.0**. Build **20261103.0845**, built **2026-11-03 08:45**.
+Current version: **1.11.1**. Build **20261103.1715**, built **2026-11-03 17:15**.
 
 The main menu shows the version, build number, and build timestamp on every
 render. `git-create --version` prints the same build metadata.
@@ -1136,6 +1136,10 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
 
 ## Safety model
 
+- **Trusted repositories only.** Git hooks, `.gitattributes` filters,
+  `core.hooksPath`, submodules, and the optional `gitcreate.precommit` command
+  can execute code with your permissions. Review a repository before using the
+  app on it, and do not run the app with elevated privileges.
 - **No force push.** The app never passes `--force` or `--force-with-lease`.
 - **No shared-history rewrite.** It does not run `filter-repo`, `rebase -i`,
   `reset --hard`, or `clean -fdx`. The explicit “undo last local commit” helper
@@ -1171,6 +1175,12 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
 - **GitHub admin writes are explicit.** Branch-protection changes are shown
   before applying, removal requires typing `DISABLE PROTECTION`, and Actions
   secret values are read without echo, passed on stdin, and never printed.
+- **Credential-bearing URLs are redacted in output.** Existing remote URLs with
+  embedded usernames/passwords or token query parameters are masked in human
+  and JSON display while the raw value remains available only to Git commands.
+- **External terminal output is sanitized.** Git and `gh` output is stripped of
+  terminal control sequences before display to reduce escape-sequence attacks
+  from untrusted repositories or workflow logs.
 
 Secrets that were already pushed cannot be fixed by deleting the file in a new
 commit. Rotate the credential first, then consider history rewriting with a
