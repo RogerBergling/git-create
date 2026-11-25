@@ -8908,7 +8908,7 @@ def show_diff(root: Path, cached: bool = False, max_lines: int = 200) -> None:
         return
     print(col(label + ":", "bold"))
     for line in lines[:max_lines]:
-        print(line)
+        print(safe_text(line))
     if len(lines) > max_lines:
         info(f"Diff truncated after {max_lines} lines. Use 'git diff' manually to view the rest.")
 

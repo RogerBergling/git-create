@@ -60,6 +60,7 @@ elevated privileges.
 - Recovery files are created exclusively with private (`0600`) permissions.
 - Remote URLs displayed in reports and JSON are redacted; token query parameters
   and embedded credentials are not printed.
-- External Git and `gh` output is stripped of terminal control sequences before
-  display.
+- Captured Git/`gh` output and diffs are stripped of terminal control sequences
+  before display. Interactive commands that intentionally hand over the
+  terminal (`git add -p`, `gh auth login`) inherit output directly.
 - The application never force-pushes or rewrites shared history automatically.

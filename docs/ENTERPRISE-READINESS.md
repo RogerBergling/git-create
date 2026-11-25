@@ -14,12 +14,11 @@ secret patterns. Those are solid foundations.
 
 It is **not yet enterprise-ready**. The main blockers are:
 
-1. no declared repository license;
-2. `github.com` is hardcoded, so GitHub Enterprise Server is unsupported;
-3. no durable audit log or policy-as-code enforcement;
-4. Linux-only support;
-5. limited automated coverage of the 8,000+ line runtime;
-6. no release provenance (tags, checksums, SBOM, signed artifacts).
+1. `github.com` is hardcoded, so GitHub Enterprise Server is unsupported;
+2. no durable audit log or policy-as-code enforcement;
+3. Linux-only support;
+4. limited automated coverage of the 8,000+ line runtime;
+5. no release provenance (tags, checksums, SBOM, signed artifacts).
 
 This document separates release blockers from scale and polish work.
 
@@ -39,21 +38,7 @@ This document separates release blockers from scale and polish work.
 
 ## Priority 0: release blockers
 
-### 1. Declare a license
-
-There is no `LICENSE` file. Without one, the default copyright rules apply:
-enterprises cannot confidently redistribute, modify, or accept contributions.
-This is a legal/product decision, not a code change.
-
-Recommended choices:
-
-- **Apache-2.0** if patent grants and enterprise contribution terms matter.
-- **MIT** for the simplest permissive model.
-
-Do not add a license without owner approval. After choosing, add `LICENSE`,
-update `README.md`, and update `CONTRIBUTING.md`.
-
-### 2. Support GitHub Enterprise Server
+### 1. Support GitHub Enterprise Server
 
 The authentication, URL parsing, API, and audit paths assume `github.com`.
 Relevant code includes `parse_github_url`, `ensure_gh`, `gh_auth_status`, the

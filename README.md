@@ -1,5 +1,7 @@
 # git-create
 
+**Project facts (2026-11-25):** version **1.11.1**, build **20261103.1715** · single-file Python 3.9+ standard library · 14 unit tests + offline repository check · MIT licensed.
+
 A safe, menu-driven Git and GitHub assistant for Linux. It is a **single
 Python file with no third-party dependencies**. It helps you create, clone,
 publish, verify, rename, branch, undo/revert, containerize, commit, push, and
@@ -1178,9 +1180,11 @@ subcommand. `--debug` prints a Python traceback for unexpected errors. The
 - **Credential-bearing URLs are redacted in output.** Existing remote URLs with
   embedded usernames/passwords or token query parameters are masked in human
   and JSON display while the raw value remains available only to Git commands.
-- **External terminal output is sanitized.** Git and `gh` output is stripped of
-  terminal control sequences before display to reduce escape-sequence attacks
-  from untrusted repositories or workflow logs.
+- **Captured and displayed output is sanitized.** Captured Git/`gh` output and
+  diffs are stripped of terminal control sequences before display. Interactive
+  commands that deliberately hand the terminal to Git or `gh` (for example
+  `git add -p` and `gh auth login`) inherit their output directly; treat those
+  as trusted interactive sessions.
 
 Secrets that were already pushed cannot be fixed by deleting the file in a new
 commit. Rotate the credential first, then consider history rewriting with a
@@ -1540,8 +1544,8 @@ Development constraints, validation commands, and the pull request checklist are
 documented in [`CONTRIBUTING.md`](CONTRIBUTING.md). `make verify` runs lint,
 tests, the offline self-check, and the history secret scan.
 
-No license has been declared yet. External contributions should wait until the
-maintainer selects a license; see the [License](#license) section.
+The repository is MIT licensed; see [`LICENSE`](LICENSE) and the
+[License](#license) section. Contributions are accepted under the same terms.
 
 ## Enterprise readiness
 
@@ -1549,7 +1553,6 @@ maintainer selects a license; see the [License](#license) section.
 prioritized enterprise review and adoption checklist. Current known gaps
 include:
 
-- no declared repository license;
 - `github.com` only, with no GitHub Enterprise Server support;
 - no durable audit log or policy-as-code enforcement;
 - Linux-only runtime support;
@@ -1563,10 +1566,7 @@ the roadmap preserves them while addressing the gaps above.
 
 ## License
 
-No license has been declared. Until a `LICENSE` file is added, the repository is
-not suitable for redistribution, external contributions, or enterprise
-deployment. The maintainer must choose a license; this review does not make that
-legal decision automatically.
+MIT. See [`LICENSE`](LICENSE). The tool is provided as-is, without warranty.
 
 ## Repository layout
 

@@ -61,6 +61,5 @@ Do not report vulnerabilities in a public issue. Follow `SECURITY.md`.
 
 ## Licensing
 
-The repository does not yet declare a license. Until the maintainer adds a
-`LICENSE` file, do not submit external contributions; contribution terms would
-be ambiguous. See `docs/ENTERPRISE-READINESS.md`.
+The repository is MIT licensed; see [`LICENSE`](LICENSE). By submitting a
+contribution you agree it is provided under the same MIT terms.
